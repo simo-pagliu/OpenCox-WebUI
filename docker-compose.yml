@@ -1,0 +1,31 @@
+services:
+  # Web application container
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "5050:5000"
+    volumes:
+      - ./web_app:/app/web_app
+      - ./analysis_pipeline:/app/analysis_pipeline
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    command: python -m web_app.app
+    restart: unless-stopped
+    depends_on:
+      - analysis
+
+  # Analysis pipeline container (optional - can also run in web container)
+  analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile.analysis
+    volumes:
+      - ./analysis_pipeline:/app/analysis_pipeline
+      - ./output:/app/output
+    # This container just provides the analysis scripts
+    # The web container will call them via subprocess
+    command: tail -f /dev/null  # Keep container running
+    restart: unless-stopped

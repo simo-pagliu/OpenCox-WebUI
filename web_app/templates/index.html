@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>OpenCox</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}" />
+</head>
+<body>
+    <!-- Only shown once a file is loaded: the one way back to pick a different file -->
+    <div class="change-file-bar" id="changeFileBar" style="display: none;">
+        <label class="change-file-btn" for="csv-file-change">Open Different File</label>
+        <input type="file" id="csv-file-change" accept=".csv" class="file-input-hidden" aria-label="Open a different CSV file" onchange="uploadCSVFile(this.files[0])">
+        <span id="current-file-status" class="current-file-status"></span>
+    </div>
+
+    <div id="error" class="error-message"></div>
+
+    <!-- Landing: pick a file, or a loading spinner while one is being processed.
+         The main app below stays hidden until data is actually ready. -->
+    <div class="landing" id="landing">
+        <div class="landing-card" id="landingCard">
+            <h1 class="landing-title">OpenCox</h1>
+            <p class="landing-description">Upload a Pico rowing log CSV to see your GPS track, pace, and stroke rate.</p>
+            <label class="upload-control" for="csv-file-upload">Choose CSV File</label>
+            <input type="file" id="csv-file-upload" accept=".csv" class="file-input-hidden" aria-label="CSV file to upload" onchange="uploadCSVFile(this.files[0])">
+        </div>
+        <div class="landing-loading" id="landingLoading" style="display: none;">
+            <div class="spinner spinner-lg"></div>
+            <p>Processing your file…</p>
+        </div>
+    </div>
+
+    <!-- Main app, hidden until data is ready -->
+    <div id="app" style="display: none;">
+        <!-- Pace chart doubles as the range selector: drag on it to pick a range,
+             drag either handle to adjust it, double-click to clear it. Analysis
+             for the current selection runs automatically (see runAutoAnalysis). -->
+        <div class="chart-slider-container">
+            <div class="pace-profile-container">
+                <canvas id="paceProfileChart" class="pace-profile-chart"></canvas>
+            </div>
+
+            <div class="range-controls-bar">
+                <div class="range-controls">
+                    <div class="range-group">
+                        <span>Distance:</span>
+                        <input type="text" id="distance-start" class="range-input" placeholder="0m" aria-label="Selection start distance" onchange="updateRangeFromInputs()">
+                        <span>-</span>
+                        <input type="text" id="distance-end" class="range-input" placeholder="0m" aria-label="Selection end distance" onchange="updateRangeFromInputs()">
+                    </div>
+                    <div class="range-group">
+                        <span>Time:</span>
+                        <input type="text" id="time-start" class="range-input range-input-time" placeholder="0:00" aria-label="Selection start time" onchange="updateRangeFromInputs()">
+                        <span>-</span>
+                        <input type="text" id="time-end" class="range-input range-input-time" placeholder="0:00" aria-label="Selection end time" onchange="updateRangeFromInputs()">
+                    </div>
+                </div>
+                <div class="analyzing-indicator" id="analyzingIndicator">
+                    <div class="spinner"></div>
+                    <span>Analyzing…</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Two-column layout: Map on left, Stats on right -->
+        <div class="content-columns">
+            <!-- Map column -->
+            <div class="map-column">
+                <div class="map-header">
+                    <div class="layer-selector">
+                        <select id="layer-dropdown" aria-label="Map overlay layer" onchange="showOverlay(this.value)">
+                            <option value="track">Track</option>
+                            <option value="speed">Speed/Pace</option>
+                            <option value="spm">SPM</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="map"></div>
+                <div id="colorbar-fixed" class="colorbar-fixed"></div>
+            </div>
+
+            <!-- Stats column -->
+            <div class="stats-column">
+                <div id="stats-box" class="stats-box visible">
+                    <div class="analysis-grid" id="analysis-grid">
+                        <div class="analysis-item">
+                            <div class="label">Distance</div>
+                            <div class="value" id="analysis-distance">0m</div>
+                        </div>
+                        <div class="analysis-item">
+                            <div class="label">Time</div>
+                            <div class="value" id="analysis-time">0:00</div>
+                        </div>
+                        <div class="analysis-item">
+                            <div class="label">Avg Pace</div>
+                            <div class="value" id="analysis-avg-pace">0:00.00</div>
+                        </div>
+                        <div class="analysis-item">
+                            <div class="label">Avg SPM</div>
+                            <div class="value" id="analysis-avg-spm">0</div>
+                        </div>
+                    </div>
+                    <div class="detailed-stats" id="detailed-stats">
+                        <div class="stat-line" id="speed-stats">
+                            <span class="stat-type">Speed:</span>
+                            <span class="stat-detail"><span class="stat-label">Avg:</span> <span id="speed-avg">0 m/s</span></span>
+                            <span class="stat-detail"><span class="stat-label">Median:</span> <span id="speed-median">0 m/s</span></span>
+                            <span class="stat-detail"><span class="stat-label">Min:</span> <span id="speed-min">0 m/s</span></span>
+                            <span class="stat-detail"><span class="stat-label">Max:</span> <span id="speed-max">0 m/s</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% Low:</span> <span id="speed-low">0 m/s</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% High:</span> <span id="speed-high">0 m/s</span></span>
+                        </div>
+                        <div class="stat-line" id="pace-stats">
+                            <span class="stat-type">Pace:</span>
+                            <span class="stat-detail"><span class="stat-label">Avg:</span> <span id="pace-avg">0:00.00</span></span>
+                            <span class="stat-detail"><span class="stat-label">Median:</span> <span id="pace-median">0:00.00</span></span>
+                            <span class="stat-detail"><span class="stat-label">Min:</span> <span id="pace-min">0:00.00</span></span>
+                            <span class="stat-detail"><span class="stat-label">Max:</span> <span id="pace-max">0:00.00</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% Low:</span> <span id="pace-low">0:00.00</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% High:</span> <span id="pace-high">0:00.00</span></span>
+                        </div>
+                        <div class="stat-line" id="spm-stats">
+                            <span class="stat-type">SPM:</span>
+                            <span class="stat-detail"><span class="stat-label">Avg:</span> <span id="spm-avg">0</span></span>
+                            <span class="stat-detail"><span class="stat-label">Median:</span> <span id="spm-median">0</span></span>
+                            <span class="stat-detail"><span class="stat-label">Min:</span> <span id="spm-min">0</span></span>
+                            <span class="stat-detail"><span class="stat-label">Max:</span> <span id="spm-max">0</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% Low:</span> <span id="spm-low">0</span></span>
+                            <span class="stat-detail"><span class="stat-label">1% High:</span> <span id="spm-high">0</span></span>
+                        </div>
+                    </div>
+                    <div class="distribution-charts">
+                        <div class="distribution-chart-wrap">
+                            <div class="distribution-chart-title">Pace Distribution</div>
+                            <div class="distribution-chart-canvas">
+                                <canvas id="paceDistributionChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="distribution-chart-wrap">
+                            <div class="distribution-chart-title">SPM Distribution</div>
+                            <div class="distribution-chart-canvas">
+                                <canvas id="spmDistributionChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="distribution-chart-wrap">
+                            <div class="distribution-chart-title">Catch Duration Distribution</div>
+                            <div class="distribution-chart-canvas">
+                                <canvas id="catchDurationChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="distribution-chart-wrap">
+                            <div class="distribution-chart-title">Exit Duration Distribution</div>
+                            <div class="distribution-chart-canvas">
+                                <canvas id="exitDurationChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stroke-shape-wrap">
+                        <div class="distribution-chart-title">Stroke Shape (normalized to a 2s period)</div>
+                        <div class="stroke-shape-canvas">
+                            <canvas id="strokeShapeChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="selection-chart-wrap">
+                        <canvas id="selectionPaceChart" width="400" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="{{ url_for('static', filename='js/index.js') }}"></script>
+</body>
+</html>

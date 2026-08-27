@@ -1,0 +1,19 @@
+# Dockerfile for Web Application
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN pip install flask==2.3.3 werkzeug==2.3.7 gunicorn==21.2.0
+
+# Copy application
+COPY web_app /app/web_app
+COPY analysis_pipeline /app/analysis_pipeline
+
+# Create output directory
+RUN mkdir -p /app/output
+
+EXPOSE 5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "web_app.app:app"]

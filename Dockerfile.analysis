@@ -1,0 +1,16 @@
+# Dockerfile for Analysis Pipeline
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# No special dependencies needed - pure Python with standard library
+
+# Copy analysis pipeline
+COPY analysis_pipeline /app/analysis_pipeline
+
+# Create output directory
+RUN mkdir -p /app/output
+
+# Default command (container will be used for volume mounting)
+CMD ["python", "-m", "analysis_pipeline.process_csv", "--help"]

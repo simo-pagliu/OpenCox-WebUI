@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+output/
+uploads_temp/
+/test_data
+/test_data_upgraded
+*.csv
