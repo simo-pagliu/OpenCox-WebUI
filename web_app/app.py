@@ -31,7 +31,8 @@ MIXED_HEADER = [
     'record_type', 'date', 'time', 'uptime_ms', 'accel_x', 'accel_y', 'accel_z',
     'gyro_x', 'gyro_y', 'gyro_z', 'speed_mps', 'spm', 'gps_lat', 'gps_lon',
     'distance_m', 'stroke_flag', 'sats', 'hdop', 'fix_quality', 'course_deg',
-    'catch_duration_ms', 'exit_duration_ms', 'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4'
+    'catch_duration_ms', 'exit_duration_ms', 'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4',
+    'stroke_duration_ms'
 ]
 
 SHAPE_POINT_COUNT = 5
@@ -152,15 +153,17 @@ def _parse_optional_float(value):
 
 
 def load_stroke_events(csv_path, start_uptime_ms=None, end_uptime_ms=None):
-    """Extract per-stroke catch/exit transient durations and shape points from A rows.
+    """Extract per-stroke catch/exit transient durations, shape points, and
+    stroke duration from S (per-stroke summary) rows.
 
-    uptime_ms is the shared Pico monotonic clock written by both A and G
+    uptime_ms is the shared Pico monotonic clock written by A, G, and S
     rows, so a GPS-based time-range selection can be translated into an
-    uptime_ms window and used to filter these accel-derived events without
+    uptime_ms window and used to filter these stroke-summary events without
     needing a second, GPS-synced clock.
     """
     catch_durations_ms = []
     exit_durations_ms = []
+    stroke_durations_ms = []
     shapes = []
 
     with open(csv_path, 'r', newline='') as f:
@@ -168,7 +171,7 @@ def load_stroke_events(csv_path, start_uptime_ms=None, end_uptime_ms=None):
         _validate_mixed_header(reader.fieldnames)
 
         for row in reader:
-            if (row.get('record_type') or '').strip().upper() != 'A':
+            if (row.get('record_type') or '').strip().upper() != 'S':
                 continue
 
             uptime_val = _parse_optional_float(row.get('uptime_ms'))
@@ -187,6 +190,10 @@ def load_stroke_events(csv_path, start_uptime_ms=None, end_uptime_ms=None):
             if exit_duration is not None:
                 exit_durations_ms.append(exit_duration)
 
+            stroke_duration = _parse_optional_float(row.get('stroke_duration_ms'))
+            if stroke_duration is not None:
+                stroke_durations_ms.append(stroke_duration)
+
             shape_values = [_parse_optional_float(row.get('shape_%d' % i)) for i in range(SHAPE_POINT_COUNT)]
             if all(v is not None for v in shape_values):
                 shapes.append(shape_values)
@@ -194,6 +201,7 @@ def load_stroke_events(csv_path, start_uptime_ms=None, end_uptime_ms=None):
     return {
         'catch_durations_ms': catch_durations_ms,
         'exit_durations_ms': exit_durations_ms,
+        'stroke_durations_ms': stroke_durations_ms,
         'shapes': shapes,
     }
 

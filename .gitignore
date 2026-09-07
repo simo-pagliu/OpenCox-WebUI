@@ -8,3 +8,4 @@ uploads_temp/
 /test_data
 /test_data_upgraded
 *.csv
+.claude/settings.json

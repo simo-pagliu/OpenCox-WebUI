@@ -44,8 +44,18 @@ MIXED_HEADER_COLUMNS = [
     'record_type', 'date', 'time', 'uptime_ms', 'accel_x', 'accel_y', 'accel_z',
     'gyro_x', 'gyro_y', 'gyro_z', 'speed_mps', 'spm', 'gps_lat', 'gps_lon',
     'distance_m', 'stroke_flag', 'sats', 'hdop', 'fix_quality', 'course_deg',
-    'catch_duration_ms', 'exit_duration_ms', 'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4'
+    'catch_duration_ms', 'exit_duration_ms', 'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4',
+    'stroke_duration_ms'
 ]
+
+
+def _parse_optional_float(value):
+    if value in (None, ''):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _validate_mixed_header(fieldnames):
@@ -56,9 +66,9 @@ def _validate_mixed_header(fieldnames):
 
 
 def load_csv(csv_path):
-    """Load the mixed log and split it into accel and GPS rows."""
+    """Load the mixed log and split it into accel, GPS, and stroke rows."""
     return load_mixed_log_csv(csv_path)
- 
+
 
 def load_mixed_log_csv(csv_path):
     """
@@ -67,12 +77,14 @@ def load_mixed_log_csv(csv_path):
     Expected header: see MIXED_HEADER_COLUMNS above.
 
     Returns:
-        (all_rows, gps_rows)
+        (all_rows, gps_rows, stroke_rows)
         - all_rows: A-records (accelerometer stream)
         - gps_rows: G-records with valid GPS coordinates
+        - stroke_rows: S-records (per-stroke catch/exit/shape/duration summary)
     """
     all_rows = []
     gps_rows = []
+    stroke_rows = []
 
     with open(csv_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
@@ -104,7 +116,21 @@ def load_mixed_log_csv(csv_path):
                     'course_deg': row.get('course_deg', ''),
                 })
             elif row_type == 'S':
-                continue
+                uptime_val = _parse_optional_float(row.get('uptime_ms'))
+                if uptime_val is None:
+                    continue
+                stroke_rows.append({
+                    'uptime_ms': uptime_val,
+                    'spm': row.get('spm', ''),
+                    'catch_duration_ms': row.get('catch_duration_ms', ''),
+                    'exit_duration_ms': row.get('exit_duration_ms', ''),
+                    'shape_0': row.get('shape_0', ''),
+                    'shape_1': row.get('shape_1', ''),
+                    'shape_2': row.get('shape_2', ''),
+                    'shape_3': row.get('shape_3', ''),
+                    'shape_4': row.get('shape_4', ''),
+                    'stroke_duration_ms': row.get('stroke_duration_ms', ''),
+                })
             else:
                 raise ValueError(f'Unsupported record_type: {row_type}')
 
@@ -141,7 +167,9 @@ def load_mixed_log_csv(csv_path):
 
         filtered_gps_rows.append(row)
 
-    return all_rows, filtered_gps_rows
+    stroke_rows.sort(key=lambda row: row['uptime_ms'])
+
+    return all_rows, filtered_gps_rows, stroke_rows
 
 
 def load_unified_log_csv(csv_path):
@@ -218,19 +246,20 @@ def is_excluded(index, exclude_ranges):
     return False
 
 
-def generate_output_files(gps_rows, all_rows, exclude_ranges, output_dir='output', format_type='log_session'):
+def generate_output_files(gps_rows, all_rows, stroke_rows, exclude_ranges, output_dir='output', format_type='log_session'):
     """
-    Generate two output CSV files.
-    
+    Generate output CSV files.
+
     Args:
         gps_rows: Rows with GPS data (unique coordinates at ~1000ms intervals)
         all_rows: All rows with accelerometer data
+        stroke_rows: Per-stroke catch/exit/shape/duration summary rows (S records)
         exclude_ranges: List of (start, end) tuples to exclude
         output_dir: Directory for output files
         format_type: retained only for call-site compatibility; mixed logs only are supported
-        
+
     Returns:
-        Tuple of (gps_output_path, accel_output_path)
+        Tuple of (gps_output_path, accel_output_path, stroke_output_path)
     """
     if os.path.exists(output_dir) and not os.path.isdir(output_dir):
         os.remove(output_dir)
@@ -264,8 +293,7 @@ def generate_output_files(gps_rows, all_rows, exclude_ranges, output_dir='output
         writer = csv.writer(f)
         
         writer.writerow([
-            'uptime_ms', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'stroke_flag',
-            'catch_duration_ms', 'exit_duration_ms', 'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4'
+            'uptime_ms', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'stroke_flag'
         ])
         for i, row in enumerate(all_rows):
             if not is_excluded(i, exclude_ranges):
@@ -278,6 +306,23 @@ def generate_output_files(gps_rows, all_rows, exclude_ranges, output_dir='output
                     row.get('gyro_y', ''),
                     row.get('gyro_z', ''),
                     row.get('stroke_flag', ''),
+                ])
+
+    # Stroke output: one row per completed stroke (catch/exit/shape/duration summary)
+    stroke_output_path = os.path.join(output_dir, 'stroke_data.csv')
+
+    with open(stroke_output_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+
+        writer.writerow([
+            'uptime_ms', 'spm', 'catch_duration_ms', 'exit_duration_ms',
+            'shape_0', 'shape_1', 'shape_2', 'shape_3', 'shape_4', 'stroke_duration_ms'
+        ])
+        for i, row in enumerate(stroke_rows):
+            if not is_excluded(i, exclude_ranges):
+                writer.writerow([
+                    row.get('uptime_ms', ''),
+                    row.get('spm', ''),
                     row.get('catch_duration_ms', ''),
                     row.get('exit_duration_ms', ''),
                     row.get('shape_0', ''),
@@ -285,9 +330,10 @@ def generate_output_files(gps_rows, all_rows, exclude_ranges, output_dir='output
                     row.get('shape_2', ''),
                     row.get('shape_3', ''),
                     row.get('shape_4', ''),
+                    row.get('stroke_duration_ms', ''),
                 ])
-    
-    return gps_output_path, accel_output_path
+
+    return gps_output_path, accel_output_path, stroke_output_path
 
 
 def analyze_and_print_stats(gps_rows, exclude_ranges, pause_threshold=DEFAULT_PAUSE_THRESHOLD):
@@ -414,9 +460,10 @@ def main():
     
     # Load CSV
     print(f"Loading CSV file: {args.csv}")
-    all_rows, gps_rows = load_csv(args.csv)
+    all_rows, gps_rows, stroke_rows = load_csv(args.csv)
     print(f"Loaded {len(all_rows)} total rows")
     print(f"Found {len(gps_rows)} rows with GPS data")
+    print(f"Found {len(stroke_rows)} stroke summary rows")
     
     # Parse exclude ranges
     exclude_ranges = parse_exclude_ranges(args.exclude)
@@ -434,11 +481,12 @@ def main():
     
     # Generate output files
     print(f"\nGenerating output files in '{args.output_dir}'...")
-    gps_path, accel_path = generate_output_files(
-        gps_rows, all_rows, exclude_ranges, args.output_dir
+    gps_path, accel_path, stroke_path = generate_output_files(
+        gps_rows, all_rows, stroke_rows, exclude_ranges, args.output_dir
     )
     print(f"GPS data saved to: {gps_path}")
     print(f"Accel data saved to: {accel_path}")
+    print(f"Stroke data saved to: {stroke_path}")
     
     # Analyze and print statistics
     analysis_result = analyze_and_print_stats(gps_rows, exclude_ranges, pause_threshold)
