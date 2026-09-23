@@ -187,7 +187,8 @@
                 initPaceProfileChart();
 
                 // Catch/exit duration + stroke shape charts (whole track, no selection yet)
-                refreshStrokeCharts();
+                // Hidden until properly implemented:
+                // refreshStrokeCharts();
             }
 
             // Create overlays if we have analysis data
@@ -390,6 +391,10 @@
             }
             if (paceProfileChart) {
                 paceProfileChart.update('none');
+            }
+            const spmChart = Chart.getChart('spmProfileChart');
+            if (spmChart) {
+                spmChart.update('none');
             }
         }
 
@@ -1294,7 +1299,7 @@
                 if (window.fullTrackStats) {
                     updateStatsBox(window.fullTrackStats);
                 }
-                refreshStrokeCharts();
+                // refreshStrokeCharts();  // hidden until properly implemented
                 return;
             }
 
@@ -1316,7 +1321,7 @@
 
                 updateStatsBox(data.stats);
                 updateSelectedPaceChart();
-                refreshStrokeCharts();
+                // refreshStrokeCharts();  // hidden until properly implemented
             })
             .catch(e => {
                 setAnalyzing(false);
@@ -1630,6 +1635,8 @@
                                 display: true,
                                 text: 'Pace (s/500m)'
                             },
+                            // Same fixed width as the SPM chart's y-axis so the x scales align.
+                            afterFit: (scale) => { scale.width = 64; },
                             ticks: {
                                 callback: function(value) {
                                     return formatPace(value);
@@ -1688,9 +1695,89 @@
                 plugins: [rangeSelectorPlugin]
             });
 
+            initSpmProfileChart(maxDistance);
+
             bindRangeSelector();
             redrawPaceProfileChart();
             updateSelectedPaceChart();
+        }
+
+        // SPM over distance, drawn below the pace chart. Shares the pace chart's
+        // x range and a fixed y-axis width so the two line up vertically, and
+        // reuses rangeSelectorPlugin to mirror the current selection band.
+        function initSpmProfileChart(maxDistance) {
+            const canvas = document.getElementById('spmProfileChart');
+            if (!canvas) {
+                return;
+            }
+            const existingChart = Chart.getChart('spmProfileChart');
+            if (existingChart) {
+                existingChart.destroy();
+            }
+
+            const points = [];
+            for (let i = 0; i < gpsPoints.length && i < cumulativeDistances.length; i++) {
+                // spm 0 means "no recent strokes detected": leave a gap (null)
+                // rather than interpolating a line across it.
+                const spm = gpsPoints[i].spm || 0;
+                points.push({x: cumulativeDistances[i], y: spm > 0 ? spm : null});
+            }
+
+            const fixedYAxisWidth = (scale) => { scale.width = 64; };
+
+            new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'SPM',
+                        data: points,
+                        borderColor: THEME.accent,
+                        borderWidth: 2,
+                        tension: 0.2,
+                        cubicInterpolationMode: 'monotone',
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        pointHitRadius: 12,
+                        pointHoverBackgroundColor: THEME.accent
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {mode: 'nearest', axis: 'x', intersect: false},
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            suggestedMin: 16,
+                            suggestedMax: 40,
+                            title: {display: true, text: 'SPM'},
+                            afterFit: fixedYAxisWidth
+                        },
+                        x: {
+                            type: 'linear',
+                            position: 'bottom',
+                            min: 0,
+                            max: maxDistance,
+                            title: {display: true, text: 'Distance (m)'},
+                            ticks: {
+                                maxRotation: 45,
+                                minRotation: 45,
+                                callback: (value) => formatDistanceLabel(value),
+                                stepSize: getDistanceTickInterval(maxDistance)
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {display: false},
+                        tooltip: {
+                            callbacks: {
+                                label: (item) => 'SPM: ' + item.parsed.y.toFixed(1)
+                            }
+                        }
+                    }
+                },
+                plugins: [rangeSelectorPlugin]
+            });
         }
 
         function clearSelection() {

@@ -129,6 +129,12 @@ a { color: var(--accent); }
     padding: 15px;
     position: relative;
 }
+.spm-profile-container {
+    width: 100%;
+    height: 170px;
+    padding: 0 15px 15px;
+    position: relative;
+}
 .pace-profile-chart {
     width: 100%;
     height: 100%;

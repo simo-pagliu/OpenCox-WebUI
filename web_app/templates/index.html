@@ -40,6 +40,12 @@
                 <canvas id="paceProfileChart" class="pace-profile-chart"></canvas>
             </div>
 
+            <!-- SPM over distance, on the same x scale as the pace chart above; the
+                 selection band is mirrored here (selecting is done on the pace chart). -->
+            <div class="spm-profile-container">
+                <canvas id="spmProfileChart" class="pace-profile-chart"></canvas>
+            </div>
+
             <div class="range-controls-bar">
                 <div class="range-controls">
                     <div class="range-group">
@@ -142,6 +148,7 @@
                                 <canvas id="spmDistributionChart"></canvas>
                             </div>
                         </div>
+                        <!-- Hidden until catch/exit duration detection is properly implemented
                         <div class="distribution-chart-wrap">
                             <div class="distribution-chart-title">Catch Duration Distribution</div>
                             <div class="distribution-chart-canvas">
@@ -154,13 +161,16 @@
                                 <canvas id="exitDurationChart"></canvas>
                             </div>
                         </div>
+                        -->
                     </div>
+                    <!-- Hidden until the drive shape plot is properly implemented
                     <div class="stroke-shape-wrap">
                         <div class="distribution-chart-title">Stroke Shape (normalized to a 2s period)</div>
                         <div class="stroke-shape-canvas">
                             <canvas id="strokeShapeChart"></canvas>
                         </div>
                     </div>
+                    -->
                     <div class="selection-chart-wrap">
                         <canvas id="selectionPaceChart" width="400" height="200"></canvas>
                     </div>
