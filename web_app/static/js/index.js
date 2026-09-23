@@ -209,10 +209,11 @@
                     data.analysis.paces
                 );
 
-                // Create SPM placeholder overlay
+                // Create SPM overlay
                 spmOverlay = createSPMOverlay(
                     data.analysis.lats,
-                    data.analysis.lons
+                    data.analysis.lons,
+                    data.analysis.spms
                 );
 
                 // Initialize dropdown
@@ -291,9 +292,17 @@
                 const centerLon = hasPoints ? gpsPoints[Math.floor(gpsPoints.length / 2)].lon : 0;
 
                 map = L.map('map').setView([centerLat, centerLon], hasPoints ? 15 : 2);
-                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
-                    attribution: 'CARTO',
-                    subdomains: 'abcd'
+                // CARTO's free basemaps.cartocdn.com raster tiles now require a
+                // signed-up API key (every tile comes back as a watermarked "API
+                // KEY REQUIRED" placeholder without one). Esri's World_Dark_Gray_Base
+                // is a free, key-less dark basemap that keeps the same dark
+                // aesthetic; it tops out at native zoom 16, so maxNativeZoom lets
+                // Leaflet upscale its tiles for closer zooms instead of requesting
+                // tiles that don't exist.
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+                    attribution: 'Tiles &copy; Esri',
+                    maxZoom: 19,
+                    maxNativeZoom: 16
                 }).addTo(map);
 
                 const fitToPoints = () => {
@@ -1861,10 +1870,10 @@
         }
         
         function updateColorbar() {
-            // Now using fixed colorbar - update it if speed overlay is active
+            // Now using fixed colorbar - update it if a colored overlay is active
             const dropdown = document.getElementById('layer-dropdown');
-            if (dropdown && dropdown.value === 'speed') {
-                updateFixedColorbar('speed');
+            if (dropdown && (dropdown.value === 'speed' || dropdown.value === 'spm')) {
+                updateFixedColorbar(dropdown.value);
             }
         }
         
@@ -2028,34 +2037,48 @@
         }
         
         function createSpeedOverlayForSelection(points) {
-            // This is a simplified version for the selected portion
+            // Same per-segment speed coloring as createSpeedOverlay, computed
+            // directly from the selected points (speed/pace aren't precomputed
+            // for an arbitrary sub-range).
             const layerGroup = L.layerGroup();
 
-            // For now, just show the selected portion highlighted
-            const selectedPoints = points.map(p => [p.lat, p.lon]);
-            const polyline = L.polyline(selectedPoints, {
-                color: THEME.highlight,
-                weight: 6,
-                opacity: 0.9
-            });
-            polyline.addTo(layerGroup);
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const dist = haversine(p1.lat, p1.lon, p2.lat, p2.lon);
+                const timeDiff = (p2.time - p1.time) / 1000.0;
+                const speed = timeDiff > 0 ? dist / timeDiff : 0;
+                const color = getColorForSpeed(speed);
+
+                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+                polyline.addTo(layerGroup);
+            }
 
             return layerGroup;
         }
 
         function createSPMOverlayForSelection(points) {
+            // Same per-segment SPM coloring as createSPMOverlay, using each
+            // point's own logged spm value.
             const layerGroup = L.layerGroup();
 
-            // For now, just show the selected portion highlighted
-            const selectedPoints = points.map(p => [p.lat, p.lon]);
-            const polyline = L.polyline(selectedPoints, {
-                color: THEME.cyan,
-                weight: 6,
-                opacity: 0.7,
-                dashArray: '10,5'
-            });
-            polyline.addTo(layerGroup);
-            
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const color = getColorForSPM(p1.spm || 0);
+
+                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+                polyline.addTo(layerGroup);
+            }
+
             return layerGroup;
         }
         
@@ -2134,15 +2157,39 @@
             return layerGroup;
         }
         
-        function createSPMOverlay(lats, lons) {
+        function createSPMOverlay(lats, lons, spms) {
             const points = lats.map((lat, i) => [lat, lons[i]]);
-            
-            return L.polyline(points, {
-                color: THEME.cyan,
-                weight: 3,
-                opacity: 0.7,
-                dashArray: '10,5'
-            });
+
+            const validSpms = (spms || []).filter(s => s > 0);
+            if (validSpms.length > 0) {
+                updateSPMColorScale(Math.min(...validSpms), Math.max(...validSpms));
+                updateColorbar();
+            }
+
+            const layerGroup = L.layerGroup();
+
+            for (let i = 0; i < points.length - 1; i++) {
+                const spm = (spms && spms[i]) || 0;
+                const color = getColorForSPM(spm);
+                const spmLabel = spm > 0 ? `${spm.toFixed(1)} SPM` : 'PAUSED';
+
+                const polyline = L.polyline([points[i], points[i + 1]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+
+                polyline.bindTooltip(spmLabel, {
+                    permanent: false,
+                    direction: 'right',
+                    offset: [10, 0],
+                    className: 'speed-tooltip'
+                });
+
+                polyline.addTo(layerGroup);
+            }
+
+            return layerGroup;
         }
         
         function findNearestPoint(latlng) {

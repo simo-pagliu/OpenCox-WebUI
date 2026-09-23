@@ -1015,6 +1015,10 @@ a { color: var(--accent); }
                 <canvas id="paceProfileChart" class="pace-profile-chart"></canvas>
             </div>
 
+            <div class="pace-profile-container" style="border-top: 1px solid var(--border);">
+                <canvas id="spmProfileChart" class="pace-profile-chart"></canvas>
+            </div>
+
             <div class="range-controls-bar">
                 <div class="range-controls">
                     <div class="range-group">
@@ -1185,12 +1189,14 @@ a { color: var(--accent); }
         let cumulativeDistances = [];
         let cumulativeTimes = [];
         let allPaces = [];
+        let allSpms = [];
 
         // Highlight layer
         let highlightLayer = null;
 
         // Chart references
         let paceProfileChart = null;
+        let spmProfileChart = null;
 
         // Dark theme palette, kept in sync with the CSS custom properties in
         // index.css. Chart.js draws to canvas, so it needs its own copy of the
@@ -1567,8 +1573,9 @@ a { color: var(--accent); }
                 // Show full track stats in the main stats box
                 updateStatsBox(analysis);
 
-                // Initialize pace profile chart with full track data
+                // Initialize pace and SPM profile charts with full track data
                 initPaceProfileChart();
+                initSPMProfileChart();
             }
 
             // Create overlays from the loaded GPS points
@@ -1593,8 +1600,8 @@ a { color: var(--accent); }
                     analysis.paces
                 );
 
-                // Create SPM placeholder overlay
-                spmOverlay = createSPMOverlay(lats, lons);
+                // Create SPM overlay
+                spmOverlay = createSPMOverlay(lats, lons, analysis.spms);
 
                 // Initialize dropdown
                 const dropdown = document.getElementById('layer-dropdown');
@@ -1613,6 +1620,7 @@ a { color: var(--accent); }
             cumulativeDistances = [0];
             cumulativeTimes = [0];
             allPaces = [];
+            allSpms = [];
             totalDistance = 0;
             totalTime = 0;
             
@@ -1643,6 +1651,8 @@ a { color: var(--accent); }
                 } else {
                     allPaces.push(0);
                 }
+
+                allSpms.push(p1.spm || 0);
             }
             
             // Add last point
@@ -1672,9 +1682,17 @@ a { color: var(--accent); }
                 const centerLon = hasPoints ? gpsPoints[Math.floor(gpsPoints.length / 2)].lon : 0;
 
                 map = L.map('map').setView([centerLat, centerLon], hasPoints ? 15 : 2);
-                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
-                    attribution: 'CARTO',
-                    subdomains: 'abcd'
+                // CARTO's free basemaps.cartocdn.com raster tiles now require a
+                // signed-up API key (every tile silently comes back as a
+                // watermarked "API KEY REQUIRED" placeholder without one). Esri's
+                // World_Dark_Gray_Base is a free, key-less dark basemap that keeps
+                // the same dark aesthetic; it tops out at native zoom 16, so
+                // maxNativeZoom lets Leaflet upscale its tiles for closer zooms
+                // instead of requesting tiles that don't exist.
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+                    attribution: 'Tiles &copy; Esri',
+                    maxZoom: 19,
+                    maxNativeZoom: 16
                 }).addTo(map);
 
                 const fitToPoints = () => {
@@ -1756,12 +1774,20 @@ a { color: var(--accent); }
             syncSelectionVisualsHeavyDebounced.flush();
         }
 
+        // Redraws both profile charts' selection band (the pace and SPM charts
+        // share one selection, drawn via rangeSelectorPlugin on each).
         function redrawPaceProfileChart() {
             if (!paceProfileChart) {
                 paceProfileChart = Chart.getChart('paceProfileChart');
             }
             if (paceProfileChart) {
                 paceProfileChart.update('none');
+            }
+            if (!spmProfileChart) {
+                spmProfileChart = Chart.getChart('spmProfileChart');
+            }
+            if (spmProfileChart) {
+                spmProfileChart.update('none');
             }
         }
 
@@ -1937,22 +1963,26 @@ a { color: var(--accent); }
         // one is "start" vs "end", via the min/max normalizing in
         // setSelectionRange) instead of needing special "crossed over" handling.
         let rangeDragAnchorDistance = null;
+        // Which canvas (pace or SPM profile chart) started the current drag.
+        // The pace and SPM profile charts share one selection (selectionStart/
+        // EndDistance) and can each start a drag, but only one gesture is ever
+        // active at a time, driven off whichever canvas it started on.
+        let activeDragCanvas = null;
 
-        // Binds the drag-to-select interaction once, on the canvas element itself
-        // (which Chart.js reuses across chart re-creations). Handlers reference
-        // the `paceProfileChart` global directly rather than closing over a chart
-        // instance passed in here, so they keep working correctly even after the
+        // Binds the drag-to-select interaction once per canvas (which Chart.js
+        // reuses across chart re-creations). Handlers resolve the live Chart.js
+        // instance via Chart.getChart(canvas) on every call rather than closing
+        // over a chart instance, so they keep working correctly even after the
         // chart has been destroyed and recreated (e.g. on loading new data).
-        function bindRangeSelector() {
-            const canvas = paceProfileChart && paceProfileChart.canvas;
+        function bindRangeSelector(canvas) {
             if (!canvas || canvas.dataset.rangeSelectorBound === 'true') {
                 return;
             }
             canvas.dataset.rangeSelectorBound = 'true';
             canvas.style.cursor = 'crosshair';
 
-            function startDrag(pixel, distance) {
-                const handle = getHandleNear(paceProfileChart, pixel.x, pixel.y);
+            function startDrag(chart, pixel, distance) {
+                const handle = getHandleNear(chart, pixel.x, pixel.y);
                 if (handle === 'start') {
                     rangeDragAnchorDistance = selectionEndDistance;
                 } else if (handle === 'end') {
@@ -1962,78 +1992,45 @@ a { color: var(--accent); }
                     setSelectionRange(distance, distance);
                 }
                 rangeDragging = true;
-            }
-
-            function continueDrag(distance) {
-                setSelectionRange(rangeDragAnchorDistance, distance);
-                syncSelectionVisualsLive();
-                runAutoAnalysisDebounced();
-            }
-
-            function endDrag() {
-                if (!rangeDragging) {
-                    return;
-                }
-                rangeDragging = false;
-                flushSelectionVisuals();
+                activeDragCanvas = canvas;
             }
 
             canvas.addEventListener('mousedown', (event) => {
-                if (event.button !== 0 || !paceProfileChart || !paceProfileChart.chartArea) {
+                const chart = Chart.getChart(canvas);
+                if (event.button !== 0 || !chart || !chart.chartArea) {
                     return;
                 }
-                const pixel = eventToCanvasPixel(paceProfileChart, event);
-                if (pixel.x < paceProfileChart.chartArea.left || pixel.x > paceProfileChart.chartArea.right) {
+                const pixel = eventToCanvasPixel(chart, event);
+                if (pixel.x < chart.chartArea.left || pixel.x > chart.chartArea.right) {
                     return;
                 }
-                const distance = clamp(paceProfileChart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
-                startDrag(pixel, distance);
+                const distance = clamp(chart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
+                startDrag(chart, pixel, distance);
                 event.preventDefault();
             });
 
             canvas.addEventListener('mousemove', (event) => {
-                if (rangeDragging || !paceProfileChart || !paceProfileChart.chartArea) {
+                const chart = Chart.getChart(canvas);
+                if (rangeDragging || !chart || !chart.chartArea) {
                     return; // active drags are handled by the document-level listener below
                 }
-                const pixel = eventToCanvasPixel(paceProfileChart, event);
-                canvas.style.cursor = getHandleNear(paceProfileChart, pixel.x, pixel.y) ? 'ew-resize' : 'crosshair';
+                const pixel = eventToCanvasPixel(chart, event);
+                canvas.style.cursor = getHandleNear(chart, pixel.x, pixel.y) ? 'ew-resize' : 'crosshair';
             });
-
-            document.addEventListener('mousemove', (event) => {
-                if (!rangeDragging || !paceProfileChart || !paceProfileChart.chartArea) {
-                    return;
-                }
-                const pixel = eventToCanvasPixel(paceProfileChart, event);
-                const distance = clamp(paceProfileChart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
-                continueDrag(distance);
-            });
-
-            document.addEventListener('mouseup', endDrag);
 
             canvas.addEventListener('touchstart', (event) => {
-                if (!paceProfileChart || !paceProfileChart.chartArea || event.touches.length === 0) {
+                const chart = Chart.getChart(canvas);
+                if (!chart || !chart.chartArea || event.touches.length === 0) {
                     return;
                 }
-                const pixel = eventToCanvasPixel(paceProfileChart, event.touches[0]);
-                if (pixel.x < paceProfileChart.chartArea.left || pixel.x > paceProfileChart.chartArea.right) {
+                const pixel = eventToCanvasPixel(chart, event.touches[0]);
+                if (pixel.x < chart.chartArea.left || pixel.x > chart.chartArea.right) {
                     return;
                 }
-                const distance = clamp(paceProfileChart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
-                startDrag(pixel, distance);
+                const distance = clamp(chart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
+                startDrag(chart, pixel, distance);
                 event.preventDefault();
             }, {passive: false});
-
-            document.addEventListener('touchmove', (event) => {
-                if (!rangeDragging || !paceProfileChart || !paceProfileChart.chartArea || event.touches.length === 0) {
-                    return;
-                }
-                const pixel = eventToCanvasPixel(paceProfileChart, event.touches[0]);
-                const distance = clamp(paceProfileChart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
-                continueDrag(distance);
-                event.preventDefault();
-            }, {passive: false});
-
-            document.addEventListener('touchend', endDrag);
 
             // Double-click clears the selection (no dedicated "Reset" button).
             canvas.addEventListener('dblclick', (event) => {
@@ -2041,6 +2038,55 @@ a { color: var(--accent); }
                 clearSelection();
             });
         }
+
+        function continueDrag(distance) {
+            setSelectionRange(rangeDragAnchorDistance, distance);
+            syncSelectionVisualsLive();
+            runAutoAnalysisDebounced();
+        }
+
+        function endDrag() {
+            if (!rangeDragging) {
+                return;
+            }
+            rangeDragging = false;
+            activeDragCanvas = null;
+            flushSelectionVisuals();
+        }
+
+        // Document-level drag-continuation listeners: bound once (not per
+        // canvas), driven off whichever chart's canvas started the current drag
+        // (activeDragCanvas) — see bindRangeSelector.
+        document.addEventListener('mousemove', (event) => {
+            if (!rangeDragging || !activeDragCanvas) {
+                return;
+            }
+            const chart = Chart.getChart(activeDragCanvas);
+            if (!chart || !chart.chartArea) {
+                return;
+            }
+            const pixel = eventToCanvasPixel(chart, event);
+            const distance = clamp(chart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
+            continueDrag(distance);
+        });
+
+        document.addEventListener('mouseup', endDrag);
+
+        document.addEventListener('touchmove', (event) => {
+            if (!rangeDragging || !activeDragCanvas || event.touches.length === 0) {
+                return;
+            }
+            const chart = Chart.getChart(activeDragCanvas);
+            if (!chart || !chart.chartArea) {
+                return;
+            }
+            const pixel = eventToCanvasPixel(chart, event.touches[0]);
+            const distance = clamp(chart.scales.x.getValueForPixel(pixel.x), 0, totalDistance);
+            continueDrag(distance);
+            event.preventDefault();
+        }, {passive: false});
+
+        document.addEventListener('touchend', endDrag);
 
         function updateMapHighlight() {
             // Remove old highlight
@@ -2733,9 +2779,135 @@ a { color: var(--accent); }
                 plugins: [rangeSelectorPlugin]
             });
 
-            bindRangeSelector();
+            bindRangeSelector(canvas);
             redrawPaceProfileChart();
             updateSelectedPaceChart();
+        }
+
+        // Mirrors initPaceProfileChart() above but plots SPM instead of pace,
+        // as its own chart directly below it. Shares the same selection state
+        // and drag-to-select behavior (via rangeSelectorPlugin/bindRangeSelector)
+        // so dragging on either chart moves the same selection.
+        function initSPMProfileChart() {
+            const canvas = document.getElementById('spmProfileChart');
+            if (!canvas || allSpms.length === 0) {
+                setTimeout(initSPMProfileChart, 100);
+                return;
+            }
+
+            const existingChart = Chart.getChart('spmProfileChart');
+            if (existingChart) {
+                existingChart.destroy();
+            }
+
+            const filteredDistances = [];
+            const filteredTimes = [];
+            for (let i = 0; i < allSpms.length; i++) {
+                filteredDistances.push((cumulativeDistances[i] + cumulativeDistances[i + 1]) / 2);
+                filteredTimes.push((cumulativeTimes[i] + cumulativeTimes[i + 1]) / 2);
+            }
+
+            const chartPoints = allSpms.map((spm, i) => ({x: filteredDistances[i], y: spm}));
+
+            const ctx = canvas.getContext('2d');
+
+            const maxDistance = filteredDistances.length ? Math.max(...filteredDistances) : 0;
+            const maxTime = filteredTimes.length ? Math.max(...filteredTimes) : 0;
+            const distanceTickInterval = getDistanceTickInterval(maxDistance);
+            const timeTickInterval = getTimeTickInterval(maxTime);
+            const maxSpmValue = allSpms.length ? Math.max(...allSpms) : 0;
+            const yMax = Math.max(40, Math.ceil(maxSpmValue / 5) * 5);
+
+            spmProfileChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'SPM',
+                        data: chartPoints,
+                        borderColor: THEME.cyan,
+                        backgroundColor: 'rgba(34, 211, 238, 0.18)',
+                        borderWidth: 2.5,
+                        tension: 0.35,
+                        cubicInterpolationMode: 'monotone',
+                        pointRadius: 0,
+                        pointHoverRadius: 5,
+                        pointHitRadius: 12,
+                        pointHoverBackgroundColor: THEME.cyan,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            min: 0,
+                            max: yMax,
+                            title: {
+                                display: true,
+                                text: 'SPM'
+                            }
+                        },
+                        x: {
+                            type: 'linear',
+                            position: 'bottom',
+                            min: 0,
+                            max: maxDistance,
+                            title: {
+                                display: true,
+                                text: 'Distance (m)'
+                            },
+                            ticks: {
+                                maxRotation: 45,
+                                minRotation: 45,
+                                callback: function(value) {
+                                    return formatDistanceLabel(value);
+                                },
+                                stepSize: distanceTickInterval
+                            }
+                        },
+                        x1: {
+                            type: 'linear',
+                            position: 'top',
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            },
+                            min: 0,
+                            max: maxTime,
+                            ticks: {
+                                callback: function(value) {
+                                    return formatTimeLabel(value);
+                                },
+                                stepSize: timeTickInterval
+                            },
+                            grid: {
+                                drawOnChartArea: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (item) => 'SPM: ' + item.parsed.y.toFixed(1)
+                            }
+                        }
+                    }
+                },
+                plugins: [rangeSelectorPlugin]
+            });
+
+            bindRangeSelector(canvas);
+            redrawPaceProfileChart();
         }
 
         function clearSelection() {
@@ -2915,10 +3087,10 @@ a { color: var(--accent); }
         }
         
         function updateColorbar() {
-            // Now using fixed colorbar - update it if speed overlay is active
+            // Now using fixed colorbar - update it if a colored overlay is active
             const dropdown = document.getElementById('layer-dropdown');
-            if (dropdown && dropdown.value === 'speed') {
-                updateFixedColorbar('speed');
+            if (dropdown && (dropdown.value === 'speed' || dropdown.value === 'spm')) {
+                updateFixedColorbar(dropdown.value);
             }
         }
         
@@ -3082,34 +3254,48 @@ a { color: var(--accent); }
         }
         
         function createSpeedOverlayForSelection(points) {
-            // This is a simplified version for the selected portion
+            // Same per-segment speed coloring as createSpeedOverlay, computed
+            // directly from the selected points (speed/pace aren't precomputed
+            // for an arbitrary sub-range).
             const layerGroup = L.layerGroup();
 
-            // For now, just show the selected portion highlighted
-            const selectedPoints = points.map(p => [p.lat, p.lon]);
-            const polyline = L.polyline(selectedPoints, {
-                color: THEME.highlight,
-                weight: 6,
-                opacity: 0.9
-            });
-            polyline.addTo(layerGroup);
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const dist = haversine(p1.lat, p1.lon, p2.lat, p2.lon);
+                const timeDiff = (p2.time - p1.time) / 1000.0;
+                const speed = timeDiff > 0 ? dist / timeDiff : 0;
+                const color = getColorForSpeed(speed);
+
+                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+                polyline.addTo(layerGroup);
+            }
 
             return layerGroup;
         }
 
         function createSPMOverlayForSelection(points) {
+            // Same per-segment SPM coloring as createSPMOverlay, using each
+            // point's own logged spm value.
             const layerGroup = L.layerGroup();
 
-            // For now, just show the selected portion highlighted
-            const selectedPoints = points.map(p => [p.lat, p.lon]);
-            const polyline = L.polyline(selectedPoints, {
-                color: THEME.cyan,
-                weight: 6,
-                opacity: 0.7,
-                dashArray: '10,5'
-            });
-            polyline.addTo(layerGroup);
-            
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const color = getColorForSPM(p1.spm || 0);
+
+                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+                polyline.addTo(layerGroup);
+            }
+
             return layerGroup;
         }
         
@@ -3188,15 +3374,39 @@ a { color: var(--accent); }
             return layerGroup;
         }
         
-        function createSPMOverlay(lats, lons) {
+        function createSPMOverlay(lats, lons, spms) {
             const points = lats.map((lat, i) => [lat, lons[i]]);
-            
-            return L.polyline(points, {
-                color: THEME.cyan,
-                weight: 3,
-                opacity: 0.7,
-                dashArray: '10,5'
-            });
+
+            const validSpms = (spms || []).filter(s => s > 0);
+            if (validSpms.length > 0) {
+                updateSPMColorScale(Math.min(...validSpms), Math.max(...validSpms));
+                updateColorbar();
+            }
+
+            const layerGroup = L.layerGroup();
+
+            for (let i = 0; i < points.length - 1; i++) {
+                const spm = (spms && spms[i]) || 0;
+                const color = getColorForSPM(spm);
+                const spmLabel = spm > 0 ? `${spm.toFixed(1)} SPM` : 'PAUSED';
+
+                const polyline = L.polyline([points[i], points[i + 1]], {
+                    color: color,
+                    weight: 6,
+                    opacity: 0.9
+                });
+
+                polyline.bindTooltip(spmLabel, {
+                    permanent: false,
+                    direction: 'right',
+                    offset: [10, 0],
+                    className: 'speed-tooltip'
+                });
+
+                polyline.addTo(layerGroup);
+            }
+
+            return layerGroup;
         }
         
         function findNearestPoint(latlng) {
