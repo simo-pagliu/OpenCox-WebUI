@@ -16,18 +16,16 @@
         let selectionStart = null;
         let selectionEnd = null;
 
-        let speedOverlay = null;
-        let spmOverlay = null;
-        let trackOverlay = null;
+        // Every Leaflet layer currently drawn by renderMapOverlay(), so the
+        // next render can remove exactly those before drawing its own.
+        let mapOverlayLayers = [];
+        let mapResizeObserver = null;
 
         let totalDistance = 0;
         let totalTime = 0;
         let cumulativeDistances = [];
         let cumulativeTimes = [];
         let allPaces = [];
-
-        // Highlight layer
-        let highlightLayer = null;
 
         // Chart references
         let paceProfileChart = null;
@@ -49,6 +47,7 @@
         if (typeof Chart !== 'undefined') {
             Chart.defaults.color = THEME.text;
             Chart.defaults.borderColor = THEME.grid;
+            Chart.defaults.font.size = 11;
         }
 
         // Shows exactly one of: the landing file picker, a full-page loading
@@ -183,7 +182,7 @@
                 // Show full track stats in the main stats box
                 updateStatsBox(data.analysis);
 
-                // Initialize pace profile chart with full track data
+                // Initialize the pace/SPM profile chart with full track data
                 initPaceProfileChart();
 
                 // Catch/exit duration + stroke shape charts (whole track, no selection yet)
@@ -191,43 +190,16 @@
                 // refreshStrokeCharts();
             }
 
-            // Create overlays if we have analysis data
-            if (data.analysis && data.analysis.lats && data.analysis.lats.length > 0) {
-                // Keep the original track overlay
-                trackOverlay = L.polyline(
-                    data.analysis.lats.map((lat, i) => [lat, data.analysis.lons[i]]),
-                    {color: THEME.accent, weight: 3}
-                ).addTo(map);
-                // Layers added right after the map was created can be mispositioned
-                // until Leaflet recomputes pixel geometry for the container's final size.
-                map.invalidateSize();
-
-                // Create speed overlay
-                speedOverlay = createSpeedOverlay(
-                    data.analysis.lats,
-                    data.analysis.lons,
-                    data.analysis.speeds,
-                    data.analysis.paces
-                );
-
-                // Create SPM overlay
-                spmOverlay = createSPMOverlay(
-                    data.analysis.lats,
-                    data.analysis.lons,
-                    data.analysis.spms
-                );
-
-                // Initialize dropdown
-                const dropdown = document.getElementById('layer-dropdown');
-                if (dropdown) {
-                    dropdown.value = 'track';
-                }
-
-                // Show track by default - add it to map
-                if (trackOverlay) {
-                    trackOverlay.addTo(map);
-                }
+            // Map overlays are drawn from gpsPoints (the same points the
+            // selection indices refer to), starting on the plain track.
+            const dropdown = document.getElementById('layer-dropdown');
+            if (dropdown) {
+                dropdown.value = 'track';
             }
+            // Layers added right after the map was created can be mispositioned
+            // until Leaflet recomputes pixel geometry for the container's final size.
+            map.invalidateSize();
+            renderMapOverlay();
         }
 
         function calculateCumulativeData() {
@@ -292,7 +264,9 @@
                 const centerLat = hasPoints ? gpsPoints[Math.floor(gpsPoints.length / 2)].lat : 0;
                 const centerLon = hasPoints ? gpsPoints[Math.floor(gpsPoints.length / 2)].lon : 0;
 
-                map = L.map('map').setView([centerLat, centerLon], hasPoints ? 15 : 2);
+                // Canvas rendering: the Pace/SPM layers are one polyline per GPS
+                // segment (thousands), which SVG redraws far more slowly.
+                map = L.map('map', {preferCanvas: true}).setView([centerLat, centerLon], hasPoints ? 15 : 2);
                 // CARTO's free basemaps.cartocdn.com raster tiles now require a
                 // signed-up API key (every tile comes back as a watermarked "API
                 // KEY REQUIRED" placeholder without one). Esri's World_Dark_Gray_Base
@@ -322,6 +296,18 @@
                     fitToPoints();
                     resolve();
                 });
+
+                // The map's panel is sized by the page layout, so it changes with
+                // the window; keep Leaflet's cached size in step with it. The
+                // #map element itself is permanent, so one observer is enough.
+                if (!mapResizeObserver && typeof ResizeObserver !== 'undefined') {
+                    mapResizeObserver = new ResizeObserver(() => {
+                        if (map) {
+                            map.invalidateSize();
+                        }
+                    });
+                    mapResizeObserver.observe(map.getContainer());
+                }
             });
         }
         
@@ -364,9 +350,7 @@
         // fires shortly after the pointer settles, and immediately (via .flush())
         // the moment the drag ends.
         function syncSelectionVisualsHeavy() {
-            updateMapHighlight();
-            const currentLayer = document.getElementById('layer-dropdown').value;
-            applyOverlayToSelection(currentLayer);
+            renderMapOverlay();
             updateSelectedPaceChart();
         }
         const syncSelectionVisualsHeavyDebounced = debounce(syncSelectionVisualsHeavy, 120);
@@ -392,10 +376,6 @@
             if (paceProfileChart) {
                 paceProfileChart.update('none');
             }
-            const spmChart = Chart.getChart('spmProfileChart');
-            if (spmChart) {
-                spmChart.update('none');
-            }
         }
 
         function clamp(value, min, max) {
@@ -412,6 +392,15 @@
             const minutes = Math.floor(paceSeconds / 60);
             const seconds = paceSeconds % 60;
             return minutes + ':' + seconds.toFixed(2).padStart(5, '0');
+        }
+
+        // Compact pace for axis ticks and legends: m:ss, or m:ss.s with decimals = 1.
+        function formatPaceShort(paceSeconds, decimals = 0) {
+            const factor = Math.pow(10, decimals);
+            const rounded = Math.round(paceSeconds * factor) / factor;
+            const minutes = Math.floor(rounded / 60);
+            const seconds = rounded - minutes * 60;
+            return minutes + ':' + seconds.toFixed(decimals).padStart(decimals ? 3 + decimals : 2, '0');
         }
 
         function findNearestIndexByDistance(targetDistance) {
@@ -675,28 +664,6 @@
             });
         }
 
-        function updateMapHighlight() {
-            // Remove old highlight
-            if (highlightLayer) {
-                map.removeLayer(highlightLayer);
-            }
-            
-            if (selectionStart === null || selectionEnd === null || selectionStart >= selectionEnd) {
-                highlightLayer = null;
-                return;
-            }
-            
-            // Create highlighted polyline
-            const points = gpsPoints.slice(selectionStart, selectionEnd + 1);
-            highlightLayer = L.polyline(
-                points.map(p => [p.lat, p.lon]),
-                {color: THEME.highlight, weight: 6, opacity: 0.9}
-            ).addTo(map);
-            
-            // Bring to front
-            highlightLayer.bringToFront();
-        }
-        
         function updateStatsBox(statsData) {
             // Update the main stats box with the provided stats
             // Use null checks and default values to prevent errors
@@ -785,7 +752,7 @@
             return {binCenters, percentages};
         }
 
-        function renderDistributionChart(canvasId, values, {min, max, binCount, formatLabel, axisTitle}) {
+        function renderDistributionChart(canvasId, values, {min, max, binCount, formatLabel, axisTitle, tickStep}) {
             const canvas = document.getElementById(canvasId);
             if (!canvas) {
                 return;
@@ -832,19 +799,20 @@
                         axis: 'x',
                         intersect: false
                     },
+                    // The card's caption names the measure, so the axes only
+                    // carry units (in the tick labels) to stay compact.
                     scales: {
                         x: {
                             type: 'linear',
                             min,
                             max,
-                            title: {display: true, text: axisTitle, font: {size: 14}},
-                            ticks: {maxRotation: 0, autoSkip: true, maxTicksLimit: 5, font: {size: 13}, callback: formatLabel},
+                            title: {display: false, text: axisTitle},
+                            ticks: {maxRotation: 0, autoSkip: true, maxTicksLimit: 5, stepSize: tickStep, callback: formatLabel},
                             grid: {display: false}
                         },
                         y: {
                             beginAtZero: true,
-                            title: {display: true, text: '% of samples', font: {size: 14}},
-                            ticks: {font: {size: 13}, callback: (v) => v + '%'}
+                            ticks: {maxTicksLimit: 5, callback: (v) => v + '%'}
                         }
                     },
                     plugins: {
@@ -865,7 +833,8 @@
                 min: 80,
                 max: 240,
                 binCount: 16,
-                formatLabel: formatPace,
+                tickStep: PACE_TICK_STEP,
+                formatLabel: (v) => formatPaceShort(v),
                 axisTitle: 'Pace (/500m)'
             });
 
@@ -1336,74 +1305,42 @@
         const AUTO_ANALYZE_DELAY_MS = 700;
         const runAutoAnalysisDebounced = debounce(runAutoAnalysis, AUTO_ANALYZE_DELAY_MS);
 
+        // Zoomed-in pace for just the selected range, on its own x scale from
+        // the selection's start to its end. With no selection the card shows a
+        // hint instead of an empty plot.
         function updateSelectedPaceChart() {
-            if (selectionStart === null || selectionEnd === null || selectionStart >= selectionEnd) {
-                const existingChart = Chart.getChart('selectionPaceChart');
-                if (existingChart) {
-                    existingChart.destroy();
-                }
-                return;
-            }
-
-            const selectedPaces = allPaces.slice(selectionStart, selectionEnd);
-            const selectedDistances = cumulativeDistances.slice(selectionStart, selectionEnd + 1);
-
-            if (selectedPaces.length === 0 || selectedDistances.length < 2) {
-                const existingChart = Chart.getChart('selectionPaceChart');
-                if (existingChart) {
-                    existingChart.destroy();
-                }
-                return;
-            }
-
-            createSelectionPaceChart(selectedPaces, selectedDistances);
-        }
-        
-        function createSelectionPaceChart(paces, distances) {
             const existingChart = Chart.getChart('selectionPaceChart');
             if (existingChart) {
                 existingChart.destroy();
             }
-            
-            const ctx = document.getElementById('selectionPaceChart').getContext('2d');
-            
-            // Filter valid paces to correct range (80-240 seconds = 1:20 to 4:00)
+
+            const hasSelection = selectionStart !== null && selectionEnd !== null && selectionStart < selectionEnd;
             const chartPoints = [];
-            const validDistances = [];
-            const validTimes = [];
-            
-            for (let i = 0; i < paces.length; i++) {
-                const pace = paces[i];
-                if (pace >= 80 && pace <= 240) {
-                    // Use midpoint distance
-                    const midDistance = (distances[i] + distances[i + 1]) / 2;
-                    validDistances.push(midDistance);
-                    chartPoints.push({x: midDistance, y: pace});
-                    // Use midpoint time - we need to find the corresponding time
-                    const startIdx = selectionStart || 0;
-                    const timeIdx = startIdx + i;
-                    if (timeIdx < cumulativeTimes.length - 1) {
-                        const midTime = (cumulativeTimes[timeIdx] + cumulativeTimes[timeIdx + 1]) / 2;
-                        validTimes.push(midTime);
+            if (hasSelection) {
+                for (let i = selectionStart; i < selectionEnd; i++) {
+                    const pace = allPaces[i];
+                    if (pace >= PACE_AXIS_MIN && pace <= PACE_AXIS_MAX) {
+                        chartPoints.push({
+                            x: (cumulativeDistances[i] + cumulativeDistances[i + 1]) / 2,
+                            y: pace,
+                            t: (cumulativeTimes[i] + cumulativeTimes[i + 1]) / 2
+                        });
                     }
                 }
             }
-            
+
+            const emptyHint = document.getElementById('selectionPaceEmpty');
+            if (emptyHint) {
+                emptyHint.style.display = chartPoints.length ? 'none' : '';
+                emptyHint.textContent = hasSelection
+                    ? 'No moving pace data in this range.'
+                    : 'Select a range on the profile above to see its pace here.';
+            }
             if (chartPoints.length === 0) {
                 return;
             }
-            
-            // Correct pace range
-            const minPace = 80;
-            const maxPace = 240;
 
-            // Calculate adaptive tick intervals
-            const maxDistance = Math.max(...validDistances);
-            const maxTime = validTimes.length > 0 ? Math.max(...validTimes) : 0;
-            const distanceTickInterval = getDistanceTickInterval(maxDistance);
-            const timeTickInterval = getTimeTickInterval(maxTime);
-            
-            new Chart(ctx, {
+            new Chart(document.getElementById('selectionPaceChart').getContext('2d'), {
                 type: 'line',
                 data: {
                     datasets: [{
@@ -1411,11 +1348,11 @@
                         data: chartPoints,
                         borderColor: THEME.accent,
                         backgroundColor: THEME.accentSoft,
-                        borderWidth: 2.5,
+                        borderWidth: 2,
                         tension: 0.35,
                         cubicInterpolationMode: 'monotone',
                         pointRadius: 0,
-                        pointHoverRadius: 5,
+                        pointHoverRadius: 4,
                         pointHitRadius: 12,
                         pointHoverBackgroundColor: THEME.accent,
                         // The y-axis is reversed (faster pace at the top). Chart.js's
@@ -1423,7 +1360,7 @@
                         // start/end, which flips along with reverse and still shades
                         // the wrong side — so target an explicit scale value instead
                         // (the slow/max boundary), which always fills toward it.
-                        fill: {value: maxPace}
+                        fill: {value: PACE_AXIS_MAX}
                     }]
                 },
                 options: {
@@ -1438,64 +1375,28 @@
                     },
                     scales: {
                         y: {
-                            beginAtZero: false,
-                            min: minPace,
-                            max: maxPace,
+                            min: PACE_AXIS_MIN,
+                            max: PACE_AXIS_MAX,
                             reverse: true,
-                            title: {
-                                display: true,
-                                text: 'Pace (s/500m)'
-                            },
-                            ticks: {
-                                callback: function(value) {
-                                    return formatPace(value);
-                                }
-                            }
+                            ticks: {stepSize: PACE_TICK_STEP, callback: (value) => formatPaceShort(value)}
                         },
                         x: {
                             type: 'linear',
-                            position: 'bottom',
-                            min: 0,
-                            max: maxDistance,
-                            title: {
-                                display: true,
-                                text: 'Distance (m)'
+                            min: cumulativeDistances[selectionStart],
+                            max: cumulativeDistances[selectionEnd],
+                            afterBuildTicks: (scale) => {
+                                scale.ticks = buildDistanceTicks(scale);
                             },
-                            ticks: {
-                                maxRotation: 45,
-                                minRotation: 45,
-                                callback: function(value) {
-                                    return formatDistanceLabel(value);
-                                },
-                                stepSize: distanceTickInterval
-                            }
-                        },
-                        x1: {
-                            type: 'linear',
-                            position: 'top',
-                            title: {
-                                display: true,
-                                text: 'Time'
-                            },
-                            min: 0,
-                            max: maxTime,
-                            ticks: {
-                                callback: function(value) {
-                                    return formatTimeLabel(value);
-                                },
-                                stepSize: timeTickInterval
-                            },
-                            grid: {
-                                drawOnChartArea: false
-                            }
+                            // Plain meters: a zoomed range is often too short for
+                            // formatDistanceLabel's 0.1 km steps to tell ticks apart.
+                            ticks: {maxRotation: 0, autoSkip: true, callback: (value) => Math.round(value) + 'm'}
                         }
                     },
                     plugins: {
-                        legend: {
-                            display: false
-                        },
+                        legend: {display: false},
                         tooltip: {
                             callbacks: {
+                                title: profileTooltipTitle,
                                 label: (item) => 'Pace: ' + formatPace(item.parsed.y) + ' /500m'
                             }
                         }
@@ -1505,14 +1406,12 @@
         }
 
         // Helper function to get adaptive distance tick interval
+        // The smallest round step that keeps the axis to about ten labels. A
+        // step that would need more makes Chart.js fall back to an arbitrary
+        // spacing (labels like 987m, 3.9km).
         function getDistanceTickInterval(maxDistance) {
-            if (maxDistance <= 500) {
-                return 100; // 100m intervals for short distances
-            } else if (maxDistance <= 2000) {
-                return 500; // 500m intervals for medium distances
-            } else {
-                return 1000; // 1km intervals for long distances
-            }
+            const steps = [100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000];
+            return steps.find(step => maxDistance / step <= 10) || 20000;
         }
         
         // Helper function to format distance label
@@ -1549,64 +1448,165 @@
             return minutes + ':' + secs.toString().padStart(2, '0');
         }
         
+        // Pace axis range shared by the profile and selection charts (1:20 to
+        // 4:00 /500m); segments outside it (pauses, GPS spikes) aren't plotted.
+        const PACE_AXIS_MIN = 80;
+        const PACE_AXIS_MAX = 240;
+        const PACE_TICK_STEP = 40; // 1:20, 2:00, 2:40, 3:20, 4:00
+
+        // Tooltip title for points carrying {x: distance, t: elapsed seconds}.
+        function profileTooltipTitle(items) {
+            if (!items.length) {
+                return '';
+            }
+            const raw = items[0].raw;
+            return Math.round(raw.x) + ' m · ' + formatTimeLabel(raw.t);
+        }
+
+        // Distance covered after `seconds` of elapsed time, interpolated
+        // between GPS points (cumulativeTimes is non-decreasing).
+        function distanceAtTime(seconds) {
+            const n = cumulativeDistances.length;
+            if (n === 0) {
+                return 0;
+            }
+            if (seconds <= cumulativeTimes[0]) {
+                return cumulativeDistances[0];
+            }
+            if (seconds >= cumulativeTimes[n - 1]) {
+                return cumulativeDistances[n - 1];
+            }
+            let lo = 0;
+            let hi = n - 1;
+            while (hi - lo > 1) {
+                const mid = (lo + hi) >> 1;
+                if (cumulativeTimes[mid] <= seconds) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            const span = cumulativeTimes[hi] - cumulativeTimes[lo];
+            const fraction = span > 0 ? (seconds - cumulativeTimes[lo]) / span : 0;
+            return cumulativeDistances[lo] + fraction * (cumulativeDistances[hi] - cumulativeDistances[lo]);
+        }
+
+        // Round-distance ticks (every getDistanceTickInterval meters) for an
+        // axis with an explicit min/max. Chart.js's own stepSize can't be used
+        // here: with both bounds set it stretches the step to divide the range
+        // evenly, giving labels like 2.1km, 4.2km.
+        function buildDistanceTicks(scale) {
+            const step = getDistanceTickInterval(scale.max - scale.min);
+            const ticks = [];
+            for (let d = Math.ceil(scale.min / step) * step; d <= scale.max; d += step) {
+                ticks.push({value: d});
+            }
+            return ticks;
+        }
+
+        // Ticks for the profile's top (time) axis. The chart's x axis is
+        // distance, and time isn't linear in distance (a pause spends minutes in
+        // a few meters), so each round time is placed at the distance covered
+        // by then. Labels that would land too close together (during a pause)
+        // are dropped.
+        const TIME_TICK_MIN_GAP_PX = 56;
+
+        function buildTimeAxisTicks(scale) {
+            const step = getTimeTickInterval(totalTime);
+            const metersPerPixel = (scale.max - scale.min) / Math.max(scale.width || 1, 1);
+            const minGapMeters = TIME_TICK_MIN_GAP_PX * metersPerPixel;
+            const ticks = [];
+            let lastDistance = -Infinity;
+            for (let t = 0; t <= totalTime; t += step) {
+                const distance = distanceAtTime(t);
+                if (distance - lastDistance >= minGapMeters) {
+                    ticks.push({value: distance, timeLabel: formatTimeLabel(t)});
+                    lastDistance = distance;
+                }
+            }
+            return ticks;
+        }
+
+        // Hover mode for the profile chart's two stacked panels: the point
+        // nearest in x within whichever panel (pace or SPM) the pointer is
+        // over. Chart.js's own 'nearest' mode compares points across both
+        // panels and would often pick one from the other panel.
+        const PROFILE_HOVER_MODE = (typeof Chart !== 'undefined' && Chart.Interaction && Chart.Interaction.modes)
+            ? 'profilePanel'
+            : 'nearest';
+        if (PROFILE_HOVER_MODE === 'profilePanel') {
+            Chart.Interaction.modes.profilePanel = function (chart, event) {
+                const datasetIndex = chart.data.datasets.findIndex((dataset) => {
+                    const scale = chart.scales[dataset.yAxisID];
+                    return scale && event.y >= scale.top && event.y <= scale.bottom;
+                });
+                if (datasetIndex < 0) {
+                    return [];
+                }
+                let best = null;
+                chart.getDatasetMeta(datasetIndex).data.forEach((element, index) => {
+                    if (element.skip) {
+                        return;
+                    }
+                    const dx = Math.abs(element.x - event.x);
+                    if (!best || dx < best.dx) {
+                        best = {element, datasetIndex, index, dx};
+                    }
+                });
+                return best ? [best] : [];
+            };
+        }
+
+        // The profile chart: pace (top) and SPM (bottom) as two stacked panels
+        // of one chart, sharing the distance axis (bottom) and the time axis
+        // (top). Being one chart keeps the panels pixel-aligned, and the
+        // selection band (rangeSelectorPlugin) spans both.
         function initPaceProfileChart() {
-            // Wait for data to be loaded
             const canvas = document.getElementById('paceProfileChart');
             if (!canvas || allPaces.length === 0) {
-                setTimeout(initPaceProfileChart, 100);
                 return;
             }
-            
-            // Destroy existing chart if it exists
-            const existingChart = Chart.getChart('paceProfileChart');
+
+            const existingChart = Chart.getChart(canvas);
             if (existingChart) {
                 existingChart.destroy();
             }
-            
-            // Filter paces to valid range (1:20 to 4:00 = 80 to 240 seconds) - CORRECT RANGE
-            const minPace = 80;
-            const maxPace = 240;
-            
-            const filteredPaces = [];
-            const filteredDistances = [];
-            const filteredTimes = [];
-            
+
+            // Pace per segment, plotted at the segment's midpoint.
+            const pacePoints = [];
             for (let i = 0; i < allPaces.length; i++) {
                 const pace = allPaces[i];
-                if (pace >= minPace && pace <= maxPace) {
-                    filteredPaces.push(pace);
-                    // Use midpoint distance
-                    const midDistance = (cumulativeDistances[i] + cumulativeDistances[i + 1]) / 2;
-                    filteredDistances.push(midDistance);
-                    // Use midpoint time
-                    const midTime = (cumulativeTimes[i] + cumulativeTimes[i + 1]) / 2;
-                    filteredTimes.push(midTime);
+                if (pace >= PACE_AXIS_MIN && pace <= PACE_AXIS_MAX) {
+                    pacePoints.push({
+                        x: (cumulativeDistances[i] + cumulativeDistances[i + 1]) / 2,
+                        y: pace,
+                        t: (cumulativeTimes[i] + cumulativeTimes[i + 1]) / 2
+                    });
                 }
             }
-            
-            const chartPoints = filteredPaces.map((pace, i) => ({x: filteredDistances[i], y: pace}));
 
-            const ctx = document.getElementById('paceProfileChart').getContext('2d');
+            // SPM as logged at each GPS point. 0 means "no recent strokes
+            // detected": leave a gap (null) rather than drawing down to zero.
+            const spmPoints = gpsPoints.map((point, i) => ({
+                x: cumulativeDistances[i],
+                y: point.spm > 0 ? point.spm : null,
+                t: cumulativeTimes[i]
+            }));
 
-            // Calculate adaptive tick intervals
-            const maxDistance = Math.max(...filteredDistances);
-            const maxTime = Math.max(...filteredTimes);
-            const distanceTickInterval = getDistanceTickInterval(maxDistance);
-            const timeTickInterval = getTimeTickInterval(maxTime);
-            
-            paceProfileChart = new Chart(ctx, {
+            paceProfileChart = new Chart(canvas.getContext('2d'), {
                 type: 'line',
                 data: {
                     datasets: [{
                         label: 'Pace',
-                        data: chartPoints,
+                        yAxisID: 'yPace',
+                        data: pacePoints,
                         borderColor: THEME.accent,
                         backgroundColor: THEME.accentSoft,
-                        borderWidth: 2.5,
+                        borderWidth: 2,
                         tension: 0.35,
                         cubicInterpolationMode: 'monotone',
                         pointRadius: 0,
-                        pointHoverRadius: 5,
+                        pointHoverRadius: 4,
                         pointHitRadius: 12,
                         pointHoverBackgroundColor: THEME.accent,
                         // The y-axis is reversed (faster pace at the top). Chart.js's
@@ -1614,125 +1614,13 @@
                         // start/end, which flips along with reverse and still shades
                         // the wrong side — so target an explicit scale value instead
                         // (the slow/max boundary), which always fills toward it.
-                        fill: {value: maxPace}
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'nearest',
-                        axis: 'x',
-                        intersect: false
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: false,
-                            min: minPace,
-                            max: maxPace,
-                            reverse: true,
-                            title: {
-                                display: true,
-                                text: 'Pace (s/500m)'
-                            },
-                            // Same fixed width as the SPM chart's y-axis so the x scales align.
-                            afterFit: (scale) => { scale.width = 64; },
-                            ticks: {
-                                callback: function(value) {
-                                    return formatPace(value);
-                                }
-                            }
-                        },
-                        x: {
-                            type: 'linear',
-                            position: 'bottom',
-                            min: 0,
-                            max: maxDistance,
-                            title: {
-                                display: true,
-                                text: 'Distance (m)'
-                            },
-                            ticks: {
-                                maxRotation: 45,
-                                minRotation: 45,
-                                callback: function(value, index, values) {
-                                    return formatDistanceLabel(value);
-                                },
-                                stepSize: distanceTickInterval
-                            }
-                        },
-                        x1: {
-                            type: 'linear',
-                            position: 'top',
-                            title: {
-                                display: true,
-                                text: 'Time'
-                            },
-                            min: 0,
-                            max: maxTime,
-                            ticks: {
-                                callback: function(value) {
-                                    return formatTimeLabel(value);
-                                },
-                                stepSize: timeTickInterval
-                            },
-                            grid: {
-                                drawOnChartArea: false
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: (item) => 'Pace: ' + formatPace(item.parsed.y) + ' /500m'
-                            }
-                        }
-                    }
-                },
-                plugins: [rangeSelectorPlugin]
-            });
-
-            initSpmProfileChart(maxDistance);
-
-            bindRangeSelector();
-            redrawPaceProfileChart();
-            updateSelectedPaceChart();
-        }
-
-        // SPM over distance, drawn below the pace chart. Shares the pace chart's
-        // x range and a fixed y-axis width so the two line up vertically, and
-        // reuses rangeSelectorPlugin to mirror the current selection band.
-        function initSpmProfileChart(maxDistance) {
-            const canvas = document.getElementById('spmProfileChart');
-            if (!canvas) {
-                return;
-            }
-            const existingChart = Chart.getChart('spmProfileChart');
-            if (existingChart) {
-                existingChart.destroy();
-            }
-
-            const points = [];
-            for (let i = 0; i < gpsPoints.length && i < cumulativeDistances.length; i++) {
-                // spm 0 means "no recent strokes detected": leave a gap (null)
-                // rather than interpolating a line across it.
-                const spm = gpsPoints[i].spm || 0;
-                points.push({x: cumulativeDistances[i], y: spm > 0 ? spm : null});
-            }
-
-            const fixedYAxisWidth = (scale) => { scale.width = 64; };
-
-            new Chart(canvas.getContext('2d'), {
-                type: 'line',
-                data: {
-                    datasets: [{
+                        fill: {value: PACE_AXIS_MAX}
+                    }, {
                         label: 'SPM',
-                        data: points,
+                        yAxisID: 'ySpm',
+                        data: spmPoints,
                         borderColor: THEME.accent,
-                        borderWidth: 2,
+                        borderWidth: 1.5,
                         tension: 0.2,
                         cubicInterpolationMode: 'monotone',
                         pointRadius: 0,
@@ -1744,40 +1632,83 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: {mode: 'nearest', axis: 'x', intersect: false},
+                    interaction: {
+                        mode: PROFILE_HOVER_MODE,
+                        axis: 'x',
+                        intersect: false
+                    },
                     scales: {
-                        y: {
-                            beginAtZero: false,
-                            suggestedMin: 16,
-                            suggestedMax: 40,
-                            title: {display: true, text: 'SPM'},
-                            afterFit: fixedYAxisWidth
-                        },
                         x: {
                             type: 'linear',
                             position: 'bottom',
                             min: 0,
-                            max: maxDistance,
-                            title: {display: true, text: 'Distance (m)'},
+                            max: totalDistance,
+                            afterBuildTicks: (scale) => {
+                                scale.ticks = buildDistanceTicks(scale);
+                            },
                             ticks: {
-                                maxRotation: 45,
-                                minRotation: 45,
-                                callback: (value) => formatDistanceLabel(value),
-                                stepSize: getDistanceTickInterval(maxDistance)
+                                maxRotation: 0,
+                                autoSkip: true,
+                                callback: (value) => formatDistanceLabel(value)
                             }
+                        },
+                        xTime: {
+                            type: 'linear',
+                            position: 'top',
+                            min: 0,
+                            max: totalDistance,
+                            afterBuildTicks: (scale) => {
+                                scale.ticks = buildTimeAxisTicks(scale);
+                            },
+                            ticks: {
+                                autoSkip: false,
+                                maxRotation: 0,
+                                callback: (value, index, ticks) => (ticks[index] ? ticks[index].timeLabel : '')
+                            },
+                            grid: {drawOnChartArea: false}
+                        },
+                        // Stacked panels: Chart.js draws the last listed axis of
+                        // a stack on top, so SPM is listed first to sit below pace.
+                        ySpm: {
+                            stack: 'profile',
+                            stackWeight: 2,
+                            suggestedMin: 16,
+                            suggestedMax: 40,
+                            title: {display: true, text: 'SPM'},
+                            // The top label would sit on the panel boundary, on top
+                            // of the pace panel's bottom label.
+                            ticks: {maxTicksLimit: 4, callback: (value, index, ticks) => (index === ticks.length - 1 ? '' : value)}
+                        },
+                        yPace: {
+                            stack: 'profile',
+                            stackWeight: 3,
+                            min: PACE_AXIS_MIN,
+                            max: PACE_AXIS_MAX,
+                            reverse: true,
+                            title: {display: true, text: 'Pace /500m'},
+                            ticks: {stepSize: PACE_TICK_STEP, callback: (value) => formatPaceShort(value)}
                         }
                     },
                     plugins: {
-                        legend: {display: false},
+                        legend: {
+                            display: false
+                        },
                         tooltip: {
                             callbacks: {
-                                label: (item) => 'SPM: ' + item.parsed.y.toFixed(1)
+                                title: profileTooltipTitle,
+                                label: (item) => (item.dataset.yAxisID === 'yPace'
+                                    ? 'Pace: ' + formatPace(item.parsed.y) + ' /500m'
+                                    : 'SPM: ' + item.parsed.y.toFixed(1))
                             }
                         }
                     }
                 },
                 plugins: [rangeSelectorPlugin]
             });
+
+            bindRangeSelector(canvas);
+            redrawPaceProfileChart();
+            updateSelectedPaceChart();
         }
 
         function clearSelection() {
@@ -1787,498 +1718,235 @@
             selectionEnd = null;
             rangeDragging = false;
             rangeDragAnchorDistance = null;
-            // Don't let a stale in-flight/pending analysis for the old selection
-            // overwrite the full-track stats we're about to restore below.
+            // Don't let a stale pending analysis/redraw for the old selection
+            // overwrite the full-track view we're about to restore below.
             runAutoAnalysisDebounced.cancel();
+            syncSelectionVisualsHeavyDebounced.cancel();
             setAnalyzing(false);
 
             updateRangeInputsFromSelection();
-
-            // Remove highlight from map
-            if (highlightLayer) {
-                map.removeLayer(highlightLayer);
-                highlightLayer = null;
-            }
-
-            // Clear overlay selection
-            clearOverlaySelection();
 
             // Show full track stats
             if (window.fullTrackStats) {
                 updateStatsBox(window.fullTrackStats);
             }
 
-            // Clear the selection pace chart
-            const existingChart = Chart.getChart('selectionPaceChart');
-            if (existingChart) {
-                existingChart.destroy();
-            }
-
             redrawPaceProfileChart();
-
-            // Re-show the full overlay
-            const currentLayer = document.getElementById('layer-dropdown').value;
-            showOverlay(currentLayer);
+            renderMapOverlay();
+            updateSelectedPaceChart();
         }
 
 
-        // Global color scale settings
+        // ---------------------------------------------------------------
+        // Map overlays and their color scale
+        //
+        // Pace and SPM share one sequential blue ramp, dark to light, so "more"
+        // (a faster pace, a higher rate) always reads brighter on the dark
+        // basemap. The legend's gradient is built from the same stops, so the
+        // bar matches the line colors exactly. Segments without a meaningful
+        // value (paused, or no strokes detected) are drawn thinner, in gray.
+        // ---------------------------------------------------------------
+
+        const COLOR_RAMP = ['#256abf', '#3987e5', '#6da7ec', '#9ec5f4', '#cde2fb'];
+        const COLOR_RAMP_RGB = COLOR_RAMP.map(hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)));
+        const NO_DATA_COLOR = '#5c5f66';
         const PAUSED_SPEED_THRESHOLD = 1.5; // m/s
-        const PAUSED_COLOR = [128, 128, 128]; // Gray for paused/stopped
-        let colorScale = {
-            minSpeed: 0,
-            maxSpeed: 10,
-            minColor: [220, 50, 50],    // Red for slow
-            midColor: [255, 200, 0],    // Yellow/Orange for medium
-            maxColor: [50, 200, 50]     // Green for fast
+        // Share of values (at each end) a relative range leaves out, so a few
+        // GPS spikes don't stretch the whole scale.
+        const RELATIVE_RANGE_PERCENTILE = 5;
+
+        // Per layer: legend text, how to read and format a segment's value,
+        // and the absolute range as [dark end, bright end]. For pace the dark
+        // (slow) end is the larger number.
+        const OVERLAY_SCALES = {
+            pace: {
+                title: 'Pace (/500m)',
+                absoluteRange: [180, 100], // 3:00 to 1:40
+                noDataLabel: 'Paused',
+                valueAt: (i) => allPaces[i] || 0,
+                hasValue: (pace) => pace > 0 && pace <= 500 / PAUSED_SPEED_THRESHOLD,
+                // Tenths once the range is narrow enough for whole seconds to repeat
+                formatTick: (pace, span) => formatPaceShort(pace, span < 8 ? 1 : 0),
+                formatTooltip: (pace) => formatPace(pace) + ' /500m'
+            },
+            spm: {
+                title: 'Stroke rate (SPM)',
+                absoluteRange: [16, 40],
+                noDataLabel: 'No strokes',
+                valueAt: (i) => gpsPoints[i].spm || 0,
+                hasValue: (spm) => spm > 0,
+                formatTick: (spm, span) => spm.toFixed(span < 8 ? 1 : 0),
+                formatTooltip: (spm) => spm.toFixed(1) + ' SPM'
+            }
         };
-        
-        // SPM color scale settings
-        let spmColorScale = {
-            minSPM: 18,
-            maxSPM: 38,
-            // Blue -> Cyan -> Green color map for SPM
-            // Blue for low SPM, Green for high SPM
-            minColor: [100, 150, 255],  // Light blue for low SPM
-            midColor: [0, 255, 255],    // Cyan for medium SPM
-            maxColor: [0, 200, 100]     // Green for high SPM
-        };
-        
-        function updateColorScale(minSpeed, maxSpeed) {
-            colorScale.minSpeed = minSpeed;
-            colorScale.maxSpeed = maxSpeed || 10; // Default to 10 if max is 0
-        }
-        
-        function updateSPMColorScale(minSPM, maxSPM) {
-            spmColorScale.minSPM = minSPM;
-            spmColorScale.maxSPM = maxSPM || 38; // Default to 38 if max is 0
-        }
-        
-        function getColorForSpeed(speed) {
-            if (speed <= PAUSED_SPEED_THRESHOLD) {
-                return `rgb(${PAUSED_COLOR[0]}, ${PAUSED_COLOR[1]}, ${PAUSED_COLOR[2]})`;
-            }
-            
-            const effectiveMin = PAUSED_SPEED_THRESHOLD;
-            const effectiveMax = Math.max(colorScale.maxSpeed, PAUSED_SPEED_THRESHOLD + 1);
-            const speedRange = effectiveMax - effectiveMin;
-            
-            const normalized = speedRange > 0 ? (speed - effectiveMin) / speedRange : 0.5;
-            const clamped = Math.max(0, Math.min(normalized, 1));
-            
-            let r, g, b;
-            if (clamped < 0.5) {
-                const t = clamped * 2;
-                r = Math.floor(colorScale.minColor[0] * (1 - t) + colorScale.midColor[0] * t);
-                g = Math.floor(colorScale.minColor[1] * (1 - t) + colorScale.midColor[1] * t);
-                b = Math.floor(colorScale.minColor[2] * (1 - t) + colorScale.midColor[2] * t);
-            } else {
-                const t = (clamped - 0.5) * 2;
-                r = Math.floor(colorScale.midColor[0] * (1 - t) + colorScale.maxColor[0] * t);
-                g = Math.floor(colorScale.midColor[1] * (1 - t) + colorScale.maxColor[1] * t);
-                b = Math.floor(colorScale.midColor[2] * (1 - t) + colorScale.maxColor[2] * t);
-            }
-            
-            return `rgb(${r}, ${g}, ${b})`;
-        }
-        
-        function getColorForSPM(spm) {
-            // Handle zero or invalid SPM - use gray
-            if (spm <= 0) {
-                return `rgb(${PAUSED_COLOR[0]}, ${PAUSED_COLOR[1]}, ${PAUSED_COLOR[2]})`;
-            }
-            
-            // Normalize SPM within the scale
-            const effectiveMin = spmColorScale.minSPM;
-            const effectiveMax = Math.max(spmColorScale.maxSPM, 1);
-            const spmRange = effectiveMax - effectiveMin;
-            
-            // Normalize SPM within the effective range
-            const normalized = spmRange > 0 ? (spm - effectiveMin) / spmRange : 0.5;
-            const clamped = Math.max(0, Math.min(normalized, 1));
-            
-            // Blue -> Cyan -> Green color mapping
-            let r, g, b;
-            if (clamped < 0.5) {
-                // Blue to Cyan (low to medium SPM)
-                const t = clamped * 2; // 0 to 1
-                r = Math.floor(spmColorScale.minColor[0] * (1 - t) + spmColorScale.midColor[0] * t);
-                g = Math.floor(spmColorScale.minColor[1] * (1 - t) + spmColorScale.midColor[1] * t);
-                b = Math.floor(spmColorScale.minColor[2] * (1 - t) + spmColorScale.midColor[2] * t);
-            } else {
-                // Cyan to Green (medium to high SPM)
-                const t = (clamped - 0.5) * 2; // 0 to 1
-                r = Math.floor(spmColorScale.midColor[0] * (1 - t) + spmColorScale.maxColor[0] * t);
-                g = Math.floor(spmColorScale.midColor[1] * (1 - t) + spmColorScale.maxColor[1] * t);
-                b = Math.floor(spmColorScale.midColor[2] * (1 - t) + spmColorScale.maxColor[2] * t);
-            }
-            
-            return `rgb(${r}, ${g}, ${b})`;
-        }
-        
-        function createColorbar() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 400;
-            canvas.height = 50;
-            const ctx = canvas.getContext('2d');
-            
-            const effectiveMin = PAUSED_SPEED_THRESHOLD;
-            const effectiveMax = Math.max(colorScale.maxSpeed, PAUSED_SPEED_THRESHOLD + 1);
-            const pausedWidth = (PAUSED_SPEED_THRESHOLD / effectiveMax) * 400;
-            
-            ctx.fillStyle = `rgb(${PAUSED_COLOR[0]}, ${PAUSED_COLOR[1]}, ${PAUSED_COLOR[2]})`;
-            ctx.fillRect(0, 0, pausedWidth, 50);
-            
-            const gradient = ctx.createLinearGradient(pausedWidth, 0, 400, 0);
-            gradient.addColorStop(0, `rgb(${colorScale.minColor[0]}, ${colorScale.minColor[1]}, ${colorScale.minColor[2]})`);
-            gradient.addColorStop(0.5, `rgb(${colorScale.midColor[0]}, ${colorScale.midColor[1]}, ${colorScale.midColor[2]})`);
-            gradient.addColorStop(1, `rgb(${colorScale.maxColor[0]}, ${colorScale.maxColor[1]}, ${colorScale.maxColor[2]})`);
-            
-            ctx.fillStyle = gradient;
-            ctx.fillRect(pausedWidth, 0, 400 - pausedWidth, 50);
-            
-            ctx.fillStyle = '#000';
-            ctx.font = '11px Arial';
-            
-            ctx.textAlign = 'left';
-            ctx.fillText('PAUSED', 5, 15);
-            ctx.fillText(`< ${PAUSED_SPEED_THRESHOLD} m/s`, 5, 30);
-            
-            ctx.textAlign = 'center';
-            ctx.fillText(`${PAUSED_SPEED_THRESHOLD} m/s`, pausedWidth + 2, 35);
-            
-            const yellowPoint = pausedWidth + (400 - pausedWidth) * 0.5;
-            ctx.fillText('MEDIUM', yellowPoint, 15);
-            
-            ctx.textAlign = 'right';
-            ctx.fillText(`${effectiveMax.toFixed(1)} m/s`, 395, 35);
-            
-            return canvas;
-        }
-        
-        function updateColorbar() {
-            // Now using fixed colorbar - update it if a colored overlay is active
-            const dropdown = document.getElementById('layer-dropdown');
-            if (dropdown && (dropdown.value === 'speed' || dropdown.value === 'spm')) {
-                updateFixedColorbar(dropdown.value);
-            }
-        }
-        
-        function downsamplePoints(points, speeds, paces, stepSize = 1) {
-            const n = points.length;
-            const sampledPoints = [];
-            const sampledSpeeds = [];
-            const sampledPaces = [];
-            
-            for (let i = 0; i < n; i += stepSize) {
-                sampledPoints.push(points[i]);
-                const speedIdx = Math.min(i, speeds.length - 1);
-                const paceIdx = Math.min(i, paces.length - 1);
-                sampledSpeeds.push(speeds[speedIdx] || 0);
-                sampledPaces.push(paces[paceIdx] || 0);
-            }
-            
-            if (sampledPoints[sampledPoints.length - 1] !== points[n - 1]) {
-                sampledPoints.push(points[n - 1]);
-                sampledSpeeds.push(speeds[speeds.length - 1] || 0);
-                sampledPaces.push(paces[paces.length - 1] || 0);
-            }
-            
-            return { points: sampledPoints, speeds: sampledSpeeds, paces: sampledPaces };
-        }
-        
-        function showOverlay(type) {
-            // Hide colorbar for track overlay
-            if (type === 'track') {
-                document.getElementById('colorbar-fixed').classList.remove('visible');
-                // Remove colored overlays but keep track
-                if (speedOverlay) map.removeLayer(speedOverlay);
-                if (spmOverlay) map.removeLayer(spmOverlay);
-            } else {
-                document.getElementById('colorbar-fixed').classList.add('visible');
-                updateFixedColorbar(type);
-                // Remove all overlays including track for colored overlays
-                if (trackOverlay) map.removeLayer(trackOverlay);
-                if (speedOverlay) map.removeLayer(speedOverlay);
-                if (spmOverlay) map.removeLayer(spmOverlay);
-            }
-            
-            // Add the selected overlay
-            switch (type) {
-                case 'track':
-                    if (trackOverlay) trackOverlay.addTo(map);
-                    break;
-                case 'speed':
-                    if (speedOverlay) speedOverlay.addTo(map);
-                    break;
-                case 'spm':
-                    if (spmOverlay) spmOverlay.addTo(map);
-                    break;
-            }
-            
-            // Apply selection highlighting if a portion is selected
-            if (selectionStart !== null && selectionEnd !== null && selectionStart < selectionEnd) {
-                applyOverlayToSelection(type);
-            }
-        }
-        
-        function updateFixedColorbar(type) {
-            const colorbarContainer = document.getElementById('colorbar-fixed');
-            colorbarContainer.innerHTML = '';
-            
-            if (type === 'speed') {
-                const canvas = createColorbar();
-                colorbarContainer.appendChild(canvas);
-            } else if (type === 'spm') {
-                const canvas = createSPMColorbar();
-                colorbarContainer.appendChild(canvas);
-            }
-        }
-        
-        function createSPMColorbar() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 400;
-            canvas.height = 50;
-            const ctx = canvas.getContext('2d');
-            
-            const gradient = ctx.createLinearGradient(0, 0, 400, 0);
-            gradient.addColorStop(0, `rgb(${spmColorScale.minColor[0]}, ${spmColorScale.minColor[1]}, ${spmColorScale.minColor[2]})`);
-            gradient.addColorStop(0.5, `rgb(${spmColorScale.midColor[0]}, ${spmColorScale.midColor[1]}, ${spmColorScale.midColor[2]})`);
-            gradient.addColorStop(1, `rgb(${spmColorScale.maxColor[0]}, ${spmColorScale.maxColor[1]}, ${spmColorScale.maxColor[2]})`);
-            
-            ctx.fillStyle = gradient;
-            ctx.fillRect(0, 0, 400, 50);
-            
-            ctx.fillStyle = '#000';
-            ctx.font = '11px Arial';
-            ctx.textAlign = 'left';
-            ctx.fillText(`${spmColorScale.minSPM} SPM`, 5, 15);
-            ctx.textAlign = 'center';
-            ctx.fillText(`${Math.round((spmColorScale.minSPM + spmColorScale.maxSPM) / 2)} SPM`, 200, 35);
-            ctx.textAlign = 'right';
-            ctx.fillText(`${spmColorScale.maxSPM} SPM`, 395, 15);
-            
-            return canvas;
-        }
-        
-        function applyOverlayToSelection(type) {
-            // This function will apply the overlay only to the selected portion
-            // and gray out the rest of the track
-            
-            // First, ensure we have selection indices
-            if (selectionStart === null || selectionEnd === null || selectionStart >= selectionEnd) {
+
+        // 'absolute': the fixed ranges above, comparable across sessions.
+        // 'relative': fitted to the values on screen (the selection, if there
+        // is one), so variation within a piece stands out.
+        let colorScaleMode = 'absolute';
+
+        function setColorScaleMode(mode) {
+            if (mode === colorScaleMode) {
                 return;
             }
-            
-            // Remove any existing selection-specific overlays
-            if (window.selectionOverlay) {
-                map.removeLayer(window.selectionOverlay);
-            }
-            if (window.grayTrackOverlay) {
-                map.removeLayer(window.grayTrackOverlay);
-            }
-            
-            // Also remove the full layer overlays when showing selection
-            if (trackOverlay) map.removeLayer(trackOverlay);
-            if (speedOverlay) map.removeLayer(speedOverlay);
-            if (spmOverlay) map.removeLayer(spmOverlay);
-            
-            // Create a dimmed-out version of the full track
-            const fullTrackPoints = gpsPoints.map(p => [p.lat, p.lon]);
-            const grayTrack = L.polyline(fullTrackPoints, {
-                color: THEME.dimTrack,
-                weight: 2,
-                opacity: 0.6
-            }).addTo(map);
-            
-            // Bring the selected overlay to front
-            let selectedOverlay = null;
-            switch (type) {
-                case 'speed':
-                    selectedOverlay = createSpeedOverlayForSelection(
-                        gpsPoints.slice(selectionStart, selectionEnd + 1)
-                    );
-                    break;
-                case 'spm':
-                    selectedOverlay = createSPMOverlayForSelection(
-                        gpsPoints.slice(selectionStart, selectionEnd + 1)
-                    );
-                    break;
-                case 'track':
-                default:
-                    selectedOverlay = L.polyline(
-                        gpsPoints.slice(selectionStart, selectionEnd + 1).map(p => [p.lat, p.lon]),
-                        {color: THEME.highlight, weight: 4, opacity: 1.0}
-                    );
-                    break;
-            }
-            
-            if (selectedOverlay) {
-                selectedOverlay.addTo(map);
-                selectedOverlay.bringToFront();
-                window.selectionOverlay = selectedOverlay;
-            }
-            
-            // Store reference to gray track for cleanup
-            window.grayTrackOverlay = grayTrack;
-        }
-        
-        function createSpeedOverlayForSelection(points) {
-            // Same per-segment speed coloring as createSpeedOverlay, computed
-            // directly from the selected points (speed/pace aren't precomputed
-            // for an arbitrary sub-range).
-            const layerGroup = L.layerGroup();
-
-            for (let i = 0; i < points.length - 1; i++) {
-                const p1 = points[i];
-                const p2 = points[i + 1];
-                const dist = haversine(p1.lat, p1.lon, p2.lat, p2.lon);
-                const timeDiff = (p2.time - p1.time) / 1000.0;
-                const speed = timeDiff > 0 ? dist / timeDiff : 0;
-                const color = getColorForSpeed(speed);
-
-                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-                    color: color,
-                    weight: 6,
-                    opacity: 0.9
-                });
-                polyline.addTo(layerGroup);
-            }
-
-            return layerGroup;
+            colorScaleMode = mode;
+            renderMapOverlay();
         }
 
-        function createSPMOverlayForSelection(points) {
-            // Same per-segment SPM coloring as createSPMOverlay, using each
-            // point's own logged spm value.
-            const layerGroup = L.layerGroup();
-
-            for (let i = 0; i < points.length - 1; i++) {
-                const p1 = points[i];
-                const p2 = points[i + 1];
-                const color = getColorForSPM(p1.spm || 0);
-
-                const polyline = L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
-                    color: color,
-                    weight: 6,
-                    opacity: 0.9
-                });
-                polyline.addTo(layerGroup);
-            }
-
-            return layerGroup;
+        // t in [0, 1] -> color along COLOR_RAMP (linear between stops).
+        function rampColor(t) {
+            const scaled = clamp(t, 0, 1) * (COLOR_RAMP_RGB.length - 1);
+            const i = Math.min(Math.floor(scaled), COLOR_RAMP_RGB.length - 2);
+            const fraction = scaled - i;
+            const from = COLOR_RAMP_RGB[i];
+            const to = COLOR_RAMP_RGB[i + 1];
+            return 'rgb(' + from.map((c, k) => Math.round(c + (to[k] - c) * fraction)).join(', ') + ')';
         }
-        
-        function clearOverlaySelection() {
-            // Remove selection-specific overlays
-            if (window.selectionOverlay) {
-                map.removeLayer(window.selectionOverlay);
-                window.selectionOverlay = null;
-            }
-            if (window.grayTrackOverlay) {
-                map.removeLayer(window.grayTrackOverlay);
-                window.grayTrackOverlay = null;
-            }
-            
-            // Re-show the full overlay
-            const currentLayer = document.getElementById('layer-dropdown').value;
-            showOverlay(currentLayer);
+
+        function percentileOfSorted(sorted, pct) {
+            const k = (sorted.length - 1) * (pct / 100);
+            const f = Math.floor(k);
+            const c = Math.ceil(k);
+            return sorted[f] + (sorted[c] - sorted[f]) * (k - f);
         }
-        
-        function createSpeedOverlay(lats, lons, speeds, paces) {
-            const points = lats.map((lat, i) => [lat, lons[i]]);
-            const downsampled = downsamplePoints(points, speeds, paces, 1);
-            
-            const validSpeeds = downsampled.speeds.filter(s => s > 0);
-            if (validSpeeds.length > 0) {
-                const minSpeed = Math.min(...validSpeeds);
-                const maxSpeed = Math.max(...validSpeeds);
-                updateColorScale(minSpeed, maxSpeed);
-                updateColorbar();
+
+        // [dark end, bright end] for this layer over segments startIdx..endIdx-1.
+        function getColorRange(type, startIdx, endIdx) {
+            const scale = OVERLAY_SCALES[type];
+            if (colorScaleMode !== 'relative') {
+                return scale.absoluteRange;
             }
-            
-            const segments = [];
-            
-            for (let i = 0; i < downsampled.points.length - 1; i++) {
-                const speed = downsampled.speeds[i] || 0;
-                const color = getColorForSpeed(speed);
-                const pace = downsampled.paces[i] || 0;
-                
-                let speedLabel = `${speed.toFixed(2)} m/s`;
-                let paceLabel = `Pace: ${formatPace(pace)} /500m`;
-                
-                if (speed <= PAUSED_SPEED_THRESHOLD) {
-                    speedLabel = `PAUSED (${speed.toFixed(2)} m/s)`;
+
+            const values = [];
+            for (let i = startIdx; i < endIdx; i++) {
+                const value = scale.valueAt(i);
+                if (scale.hasValue(value)) {
+                    values.push(value);
                 }
-                
-                segments.push({
-                    points: [downsampled.points[i], downsampled.points[i + 1]],
-                    color: color,
-                    speed: speed,
-                    pace: pace,
-                    speedLabel: speedLabel,
-                    paceLabel: paceLabel
-                });
             }
-            
+            if (values.length < 2) {
+                return scale.absoluteRange;
+            }
+
+            values.sort((a, b) => a - b);
+            let low = percentileOfSorted(values, RELATIVE_RANGE_PERCENTILE);
+            let high = percentileOfSorted(values, 100 - RELATIVE_RANGE_PERCENTILE);
+            if (high - low < 1) {
+                const mid = (low + high) / 2;
+                low = mid - 0.5;
+                high = mid + 0.5;
+            }
+            // Same orientation as the absolute range (pace runs slow to fast).
+            const [darkEnd, brightEnd] = scale.absoluteRange;
+            return darkEnd > brightEnd ? [high, low] : [low, high];
+        }
+
+        function colorForValue(value, range) {
+            const [darkEnd, brightEnd] = range;
+            return rampColor((value - darkEnd) / (brightEnd - darkEnd));
+        }
+
+        // One polyline per GPS segment from startIdx to endIdx, colored by that
+        // segment's value, each with its own hover tooltip.
+        function buildColoredOverlay(type, startIdx, endIdx, range) {
+            const scale = OVERLAY_SCALES[type];
             const layerGroup = L.layerGroup();
-            
-            segments.forEach(seg => {
-                const polyline = L.polyline(seg.points, {
-                    color: seg.color,
-                    weight: 6,
-                    opacity: 0.9
-                });
-                
-                const tooltipContent = `${seg.speedLabel}<br>${seg.paceLabel}`;
-                polyline.bindTooltip(tooltipContent, {
-                    permanent: false,
-                    direction: 'right',
-                    offset: [10, 0],
-                    className: 'speed-tooltip'
-                });
-                
-                polyline.addTo(layerGroup);
+
+            for (let i = startIdx; i < endIdx; i++) {
+                const p1 = gpsPoints[i];
+                const p2 = gpsPoints[i + 1];
+                const value = scale.valueAt(i);
+                const hasValue = scale.hasValue(value);
+
+                L.polyline([[p1.lat, p1.lon], [p2.lat, p2.lon]], {
+                    color: hasValue ? colorForValue(value, range) : NO_DATA_COLOR,
+                    weight: hasValue ? 5 : 3,
+                    opacity: 0.95
+                })
+                    .bindTooltip(hasValue ? scale.formatTooltip(value) : scale.noDataLabel, {
+                        sticky: true,
+                        direction: 'right',
+                        offset: [10, 0]
+                    })
+                    .addTo(layerGroup);
+            }
+
+            return layerGroup;
+        }
+
+        // Draws the map overlay for the layer picked in the dropdown. With a
+        // selection, the whole track is dimmed and only the selected part gets
+        // the highlight (Track) or the color scale (Pace/SPM).
+        function renderMapOverlay() {
+            if (!map) {
+                return;
+            }
+            mapOverlayLayers.forEach(layer => map.removeLayer(layer));
+            mapOverlayLayers = [];
+
+            if (gpsPoints.length < 2) {
+                hideLegend();
+                return;
+            }
+
+            const type = document.getElementById('layer-dropdown').value;
+            const hasSelection = selectionStart !== null && selectionEnd !== null && selectionStart < selectionEnd;
+            const startIdx = hasSelection ? selectionStart : 0;
+            const endIdx = hasSelection ? selectionEnd : gpsPoints.length - 1;
+            const toLatLng = (p) => [p.lat, p.lon];
+
+            if (hasSelection) {
+                mapOverlayLayers.push(L.polyline(gpsPoints.map(toLatLng), {
+                    color: THEME.dimTrack,
+                    weight: 2,
+                    opacity: 0.6
+                }));
+            }
+
+            if (OVERLAY_SCALES[type]) {
+                const range = getColorRange(type, startIdx, endIdx);
+                mapOverlayLayers.push(buildColoredOverlay(type, startIdx, endIdx, range));
+                renderLegend(type, range, hasSelection);
+            } else {
+                mapOverlayLayers.push(L.polyline(
+                    gpsPoints.slice(startIdx, endIdx + 1).map(toLatLng),
+                    hasSelection ? {color: THEME.highlight, weight: 4, opacity: 1.0} : {color: THEME.accent, weight: 3}
+                ));
+                hideLegend();
+            }
+
+            mapOverlayLayers.forEach(layer => layer.addTo(map));
+        }
+
+        const LEGEND_TICK_FRACTIONS = [0, 0.25, 0.5, 0.75, 1];
+
+        function renderLegend(type, range, hasSelection) {
+            const scale = OVERLAY_SCALES[type];
+            const [darkEnd, brightEnd] = range;
+            const span = Math.abs(brightEnd - darkEnd);
+
+            document.getElementById('legend-title').textContent = scale.title;
+            document.getElementById('legend-bar').style.background = 'linear-gradient(to right, ' + COLOR_RAMP.join(', ') + ')';
+            document.getElementById('legend-ticks').replaceChildren(...LEGEND_TICK_FRACTIONS.map((fraction) => {
+                const label = document.createElement('span');
+                label.style.left = (fraction * 100) + '%';
+                label.textContent = scale.formatTick(darkEnd + (brightEnd - darkEnd) * fraction, span);
+                return label;
+            }));
+            document.getElementById('legend-nodata-label').textContent = scale.noDataLabel;
+            document.getElementById('legend-scope').textContent = colorScaleMode === 'relative'
+                ? (hasSelection ? 'Fitted to selection' : 'Fitted to this session')
+                : 'Fixed range';
+            document.querySelectorAll('.scale-toggle button').forEach((button) => {
+                button.setAttribute('aria-pressed', String(button.dataset.scale === colorScaleMode));
             });
-            
-            return layerGroup;
+            document.getElementById('colorbar-fixed').classList.add('visible');
         }
-        
-        function createSPMOverlay(lats, lons, spms) {
-            const points = lats.map((lat, i) => [lat, lons[i]]);
 
-            const validSpms = (spms || []).filter(s => s > 0);
-            if (validSpms.length > 0) {
-                updateSPMColorScale(Math.min(...validSpms), Math.max(...validSpms));
-                updateColorbar();
-            }
-
-            const layerGroup = L.layerGroup();
-
-            for (let i = 0; i < points.length - 1; i++) {
-                const spm = (spms && spms[i]) || 0;
-                const color = getColorForSPM(spm);
-                const spmLabel = spm > 0 ? `${spm.toFixed(1)} SPM` : 'PAUSED';
-
-                const polyline = L.polyline([points[i], points[i + 1]], {
-                    color: color,
-                    weight: 6,
-                    opacity: 0.9
-                });
-
-                polyline.bindTooltip(spmLabel, {
-                    permanent: false,
-                    direction: 'right',
-                    offset: [10, 0],
-                    className: 'speed-tooltip'
-                });
-
-                polyline.addTo(layerGroup);
-            }
-
-            return layerGroup;
+        function hideLegend() {
+            document.getElementById('colorbar-fixed').classList.remove('visible');
         }
-        
+
         function findNearestPoint(latlng) {
             let minDist = Infinity;
             let minIdx = 0;

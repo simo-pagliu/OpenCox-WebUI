@@ -357,6 +357,15 @@ def analyze_section(gps_points, start_idx, end_idx, pause_threshold=None):
     }
 
 
+@app.after_request
+def disable_api_caching(response):
+    # Every /api/ response describes whichever file is loaded *right now*;
+    # a cached copy would keep showing the previous upload.
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 def _require_current_file():
     current_file = get_current_csv_file()
     if not current_file:
