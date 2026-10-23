@@ -1,4 +1,4 @@
-# OpenCox UI
+# OpenCox WebUI
 
 A web page for analysing OpenCox rowing logs. Open a session's CSV file and
 it shows the track on a map, pace and stroke rate along the session, and
@@ -8,7 +8,7 @@ Part of [OpenCox](https://github.com/simo-pagliu/OpenCox):
 
 | Repo | Contents |
 |------|----------|
-| **OpenCoxUI** (this one) | Web page that analyses the logs |
+| **OpenCox-WebUI** (this one) | Web page that analyses the logs |
 | [OpenCox-RP2350](https://github.com/simo-pagliu/OpenCox-RP2350) | Firmware for the logger that records them |
 
 ## Features
@@ -42,8 +42,8 @@ relative, so it can be served from a sub-folder.
 A Docker image with nginx is included:
 
 ```bash
-docker build -t opencox-ui .
-docker run --rm -p 8080:80 opencox-ui
+docker build -t opencox-webui .
+docker run --rm -p 8080:80 opencox-webui
 ```
 
 Then open <http://localhost:8080>. Behind a reverse proxy, point it at the
@@ -72,14 +72,14 @@ docker run --rm -p 8080:80 \
   -e OPENCOX_HOME_URL=https://example.org/ \
   -e OPENCOX_FOOTER_TEXT="Hosted by Example Rowing Club" \
   -e OPENCOX_FOOTER_URL=https://example.org/ \
-  opencox-ui
+  opencox-webui
 ```
 
 Or in a Compose file:
 
 ```yaml
 services:
-  opencox-ui:
+  opencox-webui:
     build: .
     ports:
       - "8080:80"
@@ -135,7 +135,7 @@ before it define.
 
 ## License
 
-OpenCox UI is source-available under the
+OpenCox WebUI is source-available under the
 [PolyForm Noncommercial License 1.0.0](LICENSE.md). You may use, study,
 change and share it for any noncommercial purpose (personal use, hobby
 projects, research, teaching, clubs and other noncommercial organisations),

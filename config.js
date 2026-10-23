@@ -9,5 +9,5 @@ window.OPENCOX_CONFIG = {
     // Link for the footer message; '' leaves it as plain text.
     footerUrl: '',
     // Link to the source code, at the end of the footer; '' hides it.
-    repoUrl: 'https://github.com/simo-pagliu/OpenCoxUI'
+    repoUrl: 'https://github.com/simo-pagliu/OpenCox-WebUI'
 };
