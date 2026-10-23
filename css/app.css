@@ -98,8 +98,9 @@ a { color: var(--accent); }
     color: var(--text-muted);
 }
 
-/* Top bar, shown only once a file is loaded: the only way to load a
-   different one. In the page flow (not floating) so it never covers a chart. */
+/* Top bar: the optional home button and, once a file is loaded, the way to
+   load a different one. In the page flow (not floating) so it never covers a
+   chart. */
 .topbar {
     display: flex;
     align-items: center;
@@ -371,3 +372,26 @@ a { color: var(--accent); }
     box-shadow: 0 2px 6px rgba(0,0,0,0.4);
 }
 .leaflet-tooltip-right:before, .leaflet-tooltip-left:before { display: none; }
+
+/* Optional round link home and footer, both set in config.js */
+.home-button {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--accent-strong);
+    transition: background 0.2s;
+}
+.home-button:hover { background: var(--accent); }
+.home-button svg { width: 18px; height: 18px; fill: #fff; }
+.home-button[hidden], .page-footer[hidden] { display: none; }
+.page-footer { margin-top: 40px; padding: 16px 0; text-align: center; font-size: 12px; color: var(--text-muted); }
+.page-footer a { color: var(--accent); text-decoration: none; }
+.page-footer a:hover { text-decoration: underline; }
+@media (min-width: 1000px) and (min-height: 560px) {
+    /* A slim line under the app, so the one-screen layout still fits */
+    .page-footer { flex: none; margin: 0; padding: 0 0 6px; font-size: 11px; }
+}

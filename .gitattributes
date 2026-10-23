@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Run inside the Linux container: CRLF would break the #! line
+*.sh text eol=lf

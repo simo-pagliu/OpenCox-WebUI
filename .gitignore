@@ -3,9 +3,8 @@ __pycache__/
 .venv/
 venv/
 
-output/
-uploads_temp/
-/test_data
-/test_data_upgraded
 *.csv
 .claude/settings.json
+
+# Obsolete code kept locally for reference, never pushed
+old/

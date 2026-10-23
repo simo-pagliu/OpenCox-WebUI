@@ -1,203 +1,148 @@
 # OpenCox UI
 
-Web app and analysis pipeline for OpenCox rowing telemetry. Reads the CSV logs
-recorded on the boat and turns them into distance, speed, pace and stroke-rate
-analysis.
+A web page for analysing OpenCox rowing logs. Open a session's CSV file and
+it shows the track on a map, pace and stroke rate along the session, and
+statistics for the whole session or any stretch of it.
 
 Part of [OpenCox](https://github.com/simo-pagliu/OpenCox):
 
 | Repo | Contents |
 |------|----------|
-| **OpenCoxUI** (this one) | Web app and analysis pipeline |
-| [OpenCox-RP2350](https://github.com/simo-pagliu/OpenCox-RP2350) | Pico 2 W firmware that records the logs |
+| **OpenCoxUI** (this one) | Web page that analyses the logs |
+| [OpenCox-RP2350](https://github.com/simo-pagliu/OpenCox-RP2350) | Firmware for the logger that records them |
 
-A simple system for analyzing rowing GPS data with a clean separation between:
-1. **Analysis Pipeline** - Simple Python scripts for data processing (maintained by rowing experts)
-2. **Web Application** - Flask app for visualizing and excluding regions (maintained by software engineers)
+## Features
 
-## Architecture
+- **Pace & stroke rate profile** along the session, with distance and time
+  axes. Pace is shown per stroke.
+- **Map** of the track, plain or coloured by pace or stroke rate, on a fixed
+  scale (comparable across sessions) or one fitted to what's on screen.
+- **Selection**: drag across the profile, or type a distance or time range,
+  to analyse one stretch, such as a single piece; double-click to clear.
+  The map, statistics and a zoomed pace chart follow the selection.
+- **Statistics**: distance, time, average pace and stroke rate, and the
+  average, median, minimum, maximum and 1st/99th percentiles of pace, stroke
+  rate and speed, with pace and stroke rate distributions.
+
+Everything runs in the browser: the log never leaves your computer, and
+there is no server-side code. The libraries are bundled in `vendor/`; only
+the map tiles (Esri World Dark Gray) are loaded from the internet.
+
+## Running it
+
+Open `index.html` in a browser and pick a log file. No build step or
+installation is needed, and the page also works opened straight from disk.
+
+## Deployment
+
+The page is static files: `index.html`, `config.js`, `css/`, `js/` and
+`vendor/`. Copy them to any web server or static hosting. All paths are
+relative, so it can be served from a sub-folder.
+
+A Docker image with nginx is included:
+
+```bash
+docker build -t opencox-ui .
+docker run --rm -p 8080:80 opencox-ui
+```
+
+Then open <http://localhost:8080>. Behind a reverse proxy, point it at the
+container's port 80.
+
+## Configuration
+
+A deployment can add a round home button at the top left, linking back to
+the site that hosts the page, and a message in the footer. The footer also
+links to this repository. The settings are in `config.js`:
+
+| `config.js` | Environment variable | Default | Effect |
+|-------------|----------------------|---------|--------|
+| `homeUrl` | `OPENCOX_HOME_URL` | empty | Shows the home button, linking to this URL |
+| `footerText` | `OPENCOX_FOOTER_TEXT` | empty | Message at the start of the footer |
+| `footerUrl` | `OPENCOX_FOOTER_URL` | empty | Makes the footer message a link |
+| `repoUrl` | `OPENCOX_REPO_URL` | this repository | "Source code" link in the footer; empty hides it |
+
+With the static files, edit `config.js`. With the Docker image, set the
+environment variables instead: the container rewrites `config.js` from them
+at start-up. A variable that is not set keeps the default; one set to an
+empty value clears the setting.
+
+```bash
+docker run --rm -p 8080:80 \
+  -e OPENCOX_HOME_URL=https://example.org/ \
+  -e OPENCOX_FOOTER_TEXT="Hosted by Example Rowing Club" \
+  -e OPENCOX_FOOTER_URL=https://example.org/ \
+  opencox-ui
+```
+
+Or in a Compose file:
+
+```yaml
+services:
+  opencox-ui:
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      OPENCOX_HOME_URL: "https://example.org/"
+      OPENCOX_FOOTER_TEXT: "Hosted by Example Rowing Club"
+      OPENCOX_FOOTER_URL: "https://example.org/"
+```
+
+## How the numbers are computed
+
+- **Pace** is computed per stroke: the mean GPS speed over the fixes from one
+  catch to the next, using the catches the logger marks in the log
+  (`stroke_flag`). The boat's speed surges within every stroke, so a whole
+  stroke is the natural unit to average over. Gaps between catches outside
+  1.2–4.3 s (a pause, or a missed catch) are not counted as strokes and leave
+  a gap in the charts.
+- **Distance** is measured between GPS points at least about 1 s apart:
+  summing every 0.2 s step would add the position noise of each fix.
+- **Average pace and speed** are moving distance over moving time; stretches
+  slower than 1.5 m/s count as pauses. Distance and time in the summary cover
+  the whole selection, pauses included.
+- **Stroke rate** is the SPM recorded by the logger.
+
+The log format is described in the
+[firmware README](https://github.com/simo-pagliu/OpenCox-RP2350#log-format).
+
+## Project structure
 
 ```
 .
-├── analysis_pipeline/      # Pure Python - NO web dependencies
-│   ├── __init__.py
-│   ├── gps_analysis.py    # Core analysis: distance, speed, pace calculations
-│   └── process_csv.py      # CLI tool: load CSV, exclude regions, generate output files
-│
-├── web_app/               # Flask web application
-│   ├── app.py             # Web server with API endpoints
-│   └── templates/
-│       └── index.html     # Simple UI for excluding regions
-│
-├── Dockerfile.web        # Web container
-├── Dockerfile.analysis    # Analysis container (optional)
-├── docker-compose.yml     # Two-container setup
-├── run_web.py            # Run web app directly
-├── log_session_1.csv     # Input data
-└── output/               # Generated CSV files
+├── index.html              # Markup
+├── config.js               # Deployment settings (see Configuration)
+├── css/app.css             # Styles
+├── js/                     # Scripts, loaded by index.html in this order:
+│   ├── util.js             #   helpers: debounce, formatting, median
+│   ├── state.js            #   shared state, chart theme
+│   ├── log.js              #   CSV parsing, strokes, statistics for a stretch
+│   ├── charts.js           #   pace & stroke rate profile, selection chart
+│   ├── stats.js            #   statistics panel, distributions
+│   ├── map.js              #   map, colour layers, legend
+│   ├── selection.js        #   selecting a stretch
+│   └── app.js              #   opening a file, startup
+├── vendor/                 # Leaflet 1.9.4, Chart.js 4.4.0
+├── Dockerfile, nginx.conf  # Container image
+└── docker/                 # Container start-up script that writes config.js
 ```
 
-## Quick Start
-
-### Option 1: Run directly (no Docker)
-
-```bash
-# Run the web app
-python run_web.py
-
-# Open http://localhost:5000 in your browser
-```
-
-### Option 2: Use Docker
-
-```bash
-# Build and run with docker-compose
-docker-compose up --build
-
-# Open http://localhost:5000 in your browser
-```
-
-## Usage
-
-1. **Open the web app** at `http://localhost:5000`
-2. **View the GPS track** on the map
-3. **Select regions to exclude** by:
-   - Clicking on the map to set start and end points
-   - Or entering indices manually
-4. **Click "Generate CSV Files"** to create:
-   - `output/gps_data.csv` - GPS data at 1000ms intervals (lat, lon, time)
-   - `output/accel_data.csv` - Accelerometer data at 10ms intervals (x, y, z, time)
-5. **Download the files** using the provided links
-
-## Analysis Pipeline (for rowing experts)
-
-The analysis pipeline is designed to be simple and maintainable by non-software engineers.
-
-### Core Function: `analyze_gps()`
-
-```python
-from analysis_pipeline.gps_analysis import analyze_gps
-
-# Input: simple arrays
-lats = [45.959030, 45.959035, 45.959040, ...]
-lons = [8.870124, 8.870129, 8.870134, ...]
-times_ms = [0, 1000, 2000, ...]  # milliseconds
-
-# Run analysis
-result = analyze_gps(lats, lons, times_ms)
-
-# Output
-print(f"Total distance: {result['total_distance']} m")
-print(f"Total time: {result['total_time']} s")
-print(f"Average speed: {result['avg_speed']} m/s")
-print(f"Average pace: {result['avg_pace']} s/500m")
-
-# Access arrays
-speeds = result['speeds']    # List of speeds in m/s
-paces = result['paces']      # List of paces in seconds per 500m
-distances = result['distances']  # Cumulative distances in meters
-```
-
-### Command Line Tool
-
-```bash
-# Process CSV with exclusions
-python -m analysis_pipeline.process_csv --exclude "0-1000,5000-10000"
-
-# Output files will be saved to output/ directory
-# Statistics will be printed to console
-```
-
-## Web Application (for software engineers)
-
-The web app provides a simple UI for:
-- Visualizing the GPS track
-- Selecting regions to exclude
-- Generating output CSV files
-
-### API Endpoints
-
-- `GET /` - Main page
-- `GET /api/gps_points` - Get all GPS points as JSON
-- `POST /api/process` - Process with exclusions and generate files
-  - Request: `{"exclude_ranges": [[0, 1000], [5000, 10000]]}`
-  - Response: `{"status": "success", "gps_file": "...", "accel_file": "..."}`
-- `GET /output/<filename>` - Download output files
-
-## Docker Setup
-
-### Single Container (Simpler)
-
-Just use `Dockerfile.web` - it includes both the web app and analysis pipeline.
-
-### Two Container (More Modular)
-
-Use `docker-compose.yml` which provides:
-- `web` container: Flask application
-- `analysis` container: Analysis pipeline (optional)
-
-The web container calls the analysis pipeline via subprocess, so the two-container setup is optional.
-
-## CSV File Format
-
-Input CSV (`log_session_1.csv`) should contain:
-- `uptime_ms` - Time in milliseconds
-- `accel_x, accel_y, accel_z` - Accelerometer readings
-- `gps_lat, gps_lon` - GPS coordinates
-
-Output CSVs:
-- `gps_data.csv` - Columns: `uptime_ms, gps_lat, gps_lon`
-- `accel_data.csv` - Columns: `uptime_ms, accel_x, accel_y, accel_z`
-
-## Separation of Concerns
-
-| Component | Responsibility | Maintainers | Dependencies |
-|-----------|---------------|-------------|--------------|
-| `analysis_pipeline/` | Data loading, GPS analysis, CSV processing | Rowing experts | Python stdlib only |
-| `web_app/` | Web UI, API endpoints | Software engineers | Flask |
-
-This separation allows:
-- Rowing experts to modify analysis logic without touching web code
-- Software engineers to improve the UI without affecting data processing
-- Easy testing of each component independently
-- Clear ownership and responsibility
-
-## Standalone Deployment (tools.pagliuca.net)
-
-The root-level `index.html` is a separate, self-contained build of the web
-app: the same GPS/pace/SPM analysis, ported to run entirely client-side (no
-upload, no backend), with Leaflet and Chart.js inlined. It's the artifact
-served by the `tools.pagliuca.net` multi-tool deployment at
-`tools.pagliuca.net/open-cox/`. It's independent of `web_app/` (the Flask
-app above) — that one still requires a Python server; this one doesn't.
-
-Build and run it standalone:
-
-```bash
-docker build -t open-cox .
-docker run --rm -p 8080:80 open-cox
-```
-
-Then open `http://localhost:8080`.
-
-Compose service block for the `tools.pagliuca.net` deployment repo:
-
-```yaml
-open-cox:
-  build: ./open-cox
-  container_name: tools-pagliuca-net-open-cox
-  restart: unless-stopped
-  networks:
-    - proxy
-  labels:
-    - "traefik.enable=true"
-    - "traefik.http.routers.open-cox.rule=Host(`tools.pagliuca.net`) && PathPrefix(`/open-cox`)"
-    - "traefik.http.routers.open-cox.entrypoints=websecure"
-    - "traefik.http.routers.open-cox.tls.certresolver=cloudflare"
-    - "traefik.http.routers.open-cox.priority=10"
-    - "traefik.http.services.open-cox.loadbalancer.server.port=80"
-```
+The scripts are plain scripts that share their globals, not ES modules, so
+the page works without a build step and from `file://`. Their order in
+`index.html` matters: at load time each script uses only what the scripts
+before it define.
 
 ## License
 
-MIT
+OpenCox UI is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md). You may use, study,
+change and share it for any noncommercial purpose (personal use, hobby
+projects, research, teaching, clubs and other noncommercial organisations),
+as long as the license and its `Required Notice` line come with any copy you
+pass on. Commercial use is not covered by this license: to use OpenCox
+commercially, ask the author for permission.
+
+The libraries in `vendor/` keep their own licenses:
+[Leaflet](vendor/leaflet-1.9.4/LICENSE) (BSD 2-Clause) and
+[Chart.js](vendor/chart.js-4.4.0/LICENSE.md) (MIT).
